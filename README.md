@@ -40,6 +40,12 @@ Demo 阶段聚焦“盈利超预期 / 单季度净利润超预期 / 盈利预测
 - 存储：demo 阶段使用本地 JSON / Markdown 保存研究路径和报告
 - 环境管理：uv
 
+## 在线演示
+
+🚀 **[AlphaWorkbench Live Demo](http://alpha.futuri.top/)**
+
+点击上面的链接进行实时演示，无需本地安装即可体验完整的研究流程。
+
 ## 快速开始
 
 Linux / macOS：
