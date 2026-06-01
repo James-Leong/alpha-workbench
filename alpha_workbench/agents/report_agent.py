@@ -11,17 +11,42 @@ from openai import OpenAI
 load_dotenv()
 
 
+def _get_factor_results(trace: dict[str, Any]) -> list:
+    """兼容两种回测结果格式"""
+    backtest = trace.get("backtest_result", {})
+    # 主流程格式
+    if "factor_results" in backtest:
+        return backtest["factor_results"]
+    # mock_run_backtest 格式
+    if "results" in backtest:
+        return backtest["results"]
+    return []
+
+
 def _build_report_prompt(trace: dict[str, Any]) -> str:
     idea = trace["idea_spec"]
-    best = trace["backtest_result"]["factor_results"][0]
-    all_factors = trace["backtest_result"]["factor_results"]
+    factor_results = _get_factor_results(trace)
     audit = trace["audit_report"]
 
+    if not factor_results:
+        raise ValueError("没有找到回测结果")
+
+    best = factor_results[0]
+
+    # 兼容两种字段名
+    factor_name = best.get("factor_name", best.get("factor_id", "未知因子"))
+    ic_mean = best.get("ic_mean", best.get("ic", {}).get("ic_mean", 0))
+    long_short_return = best.get("long_short_return",
+                                  best.get("long_short", {}).get("annual_return", 0))
+    max_drawdown = best.get("max_drawdown",
+                             best.get("long_short", {}).get("max_drawdown", 0))
+
     factor_lines = "\n".join([
-        f"- {f['factor_name']}：IC均值={f['ic_mean']:.3f}，"
-        f"多空收益={f['long_short_return']:.2%}，"
-        f"最大回撤={f['max_drawdown']:.2%}"
-        for f in all_factors
+        f"- {f.get('factor_name', f.get('factor_id', '未知'))}："
+        f"IC均值={f.get('ic_mean', 0):.3f}，"
+        f"多空收益={f.get('long_short_return', 0):.2%}，"
+        f"最大回撤={f.get('max_drawdown', 0):.2%}"
+        for f in factor_results
     ])
 
     audit_checks = "\n".join([
@@ -54,23 +79,35 @@ def _build_report_prompt(trace: dict[str, Any]) -> str:
 
 def _mock_generate_report(trace: dict[str, Any]) -> str:
     idea = trace["idea_spec"]
-    best = trace["backtest_result"]["factor_results"][0]
     audit = trace["audit_report"]
+    factor_results = _get_factor_results(trace)
+
+    if factor_results:
+        best = factor_results[0]
+        factor_name = best.get("factor_name", best.get("factor_id", "未知因子"))
+        ic_mean = best.get("ic_mean", 0)
+        long_short_return = best.get("long_short_return", 0)
+        max_drawdown = best.get("max_drawdown", 0)
+        factor_line = f"{factor_name}"
+        metrics_line = (
+            f"IC 均值：{ic_mean:.3f}；"
+            f"多空年化收益：{long_short_return:.2%}；"
+            f"最大回撤：{max_drawdown:.2%}。"
+        )
+    else:
+        factor_line = "暂无因子数据"
+        metrics_line = "暂无回测数据"
+
     return "\n".join([
         "# AlphaWorkbench Demo 研究报告",
         "",
         f"## 投资思想\n{idea['core_hypothesis']}",
         "",
-        f"## 当前最佳候选因子\n{best['factor_name']}（{best['factor_id']}）",
+        f"## 当前最佳候选因子\n{factor_line}",
         "",
-        (
-            "## 样例回测结论\n"
-            f"IC 均值：{best['ic_mean']:.3f}；"
-            f"多空年化收益：{best['long_short_return']:.2%}；"
-            f"最大回撤：{best['max_drawdown']:.2%}。"
-        ),
+        f"## 样例回测结论\n{metrics_line}",
         "",
-        f"## 审计等级\n{audit['overall_level']}",
+        f"## 审计等级\n{audit.get('overall_level', '未知')}",
         "",
         "## 说明\n本报告由 mock demo 生成，只用于展示研发流程，不构成投资建议。",
     ])
