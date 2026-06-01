@@ -157,7 +157,7 @@ def _run_research(input_text: str, save_trace: bool) -> dict[str, Any]:
         st.write(
             f"最佳因子：**{best['factor_name']}**，"
             f"IC 均值：{best['ic_mean']:.4f}，"
-            f"夏普：{best['sharpe_ratio']:.2f}，"
+            f"夏普：{best.get('sharpe_ratio', 0):.2f}，"
             f"最大回撤：{best['max_drawdown']:.2%}"
         )
         if backtest_result.get("mercury_results"):
@@ -282,7 +282,7 @@ def _render_chat_trace(trace: dict[str, Any]) -> None:
         st.markdown("**BacktestEngine**")
         br = trace["backtest_result"]
         best = br["factor_results"][0]
-        st.write(f"最佳因子：**{best['factor_name']}**，IC 均值：{best['ic_mean']:.4f}，夏普：{best['sharpe_ratio']:.2f}，最大回撤：{best['max_drawdown']:.2%}")
+        st.write(f"最佳因子：**{best['factor_name']}**，IC 均值：{best['ic_mean']:.4f}，夏普：{best.get('sharpe_ratio', 0):.2f}，最大回撤：{best['max_drawdown']:.2%}")
         mercury = br.get("mercury_results", {})
         if mercury:
             fid, s = next(iter(mercury.items()))
@@ -557,7 +557,7 @@ def _render_workflow() -> None:
                 wf.wf_data["backtest_result"] = run_backtest(wf.wf_data["factor_specs"], wf.wf_data["research_spec"])
             br = wf.wf_data["backtest_result"]
             best = br["factor_results"][0]
-            st.write(f"最佳因子：**{best['factor_name']}**，IC 均值：{best['ic_mean']:.4f}，夏普：{best['sharpe_ratio']:.2f}，最大回撤：{best['max_drawdown']:.2%}")
+            st.write(f"最佳因子：**{best['factor_name']}**，IC 均值：{best['ic_mean']:.4f}，夏普：{best.get('sharpe_ratio', 0):.2f}，最大回撤：{best['max_drawdown']:.2%}")
 
             # --- Inline Mercury result (only the best factor) ---
             mercury = br.get("mercury_results", {})
@@ -584,7 +584,7 @@ def _render_workflow() -> None:
         st.markdown("**BacktestEngine**")
         br = wf.wf_data["backtest_result"]
         best = br["factor_results"][0]
-        st.write(f"最佳因子：**{best['factor_name']}**，IC 均值：{best['ic_mean']:.4f}，夏普：{best['sharpe_ratio']:.2f}，最大回撤：{best['max_drawdown']:.2%}")
+        st.write(f"最佳因子：**{best['factor_name']}**，IC 均值：{best['ic_mean']:.4f}，夏普：{best.get('sharpe_ratio', 0):.2f}，最大回撤：{best['max_drawdown']:.2%}")
         mercury = br.get("mercury_results", {})
         if mercury:
             fid, s = next(iter(mercury.items()))
