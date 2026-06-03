@@ -58,6 +58,8 @@ def generate_sample_data(
     n_stocks: int = 50,
     n_days: int = 252,
     start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    securities: Optional[List[str]] = None,
     seed: int = 42
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
@@ -67,6 +69,8 @@ def generate_sample_data(
         n_stocks: 股票数量
         n_days: 交易日数量
         start_date: 开始日期，默认一年前
+        end_date: 结束日期，传入后按 start_date/end_date 生成工作日区间
+        securities: 显式股票列表，传入后优先于 n_stocks
         seed: 随机种子
         
     Returns:
@@ -75,11 +79,19 @@ def generate_sample_data(
     np.random.seed(seed)
     
     # 生成日期索引
-    if start_date is None:
-        start_date = (datetime.now() - timedelta(days=n_days)).strftime('%Y-%m-%d')
-    
-    dates = pd.date_range(start=start_date, periods=n_days, freq='B')  # 工作日
-    stocks = generate_sample_security_codes(n_stocks)
+    if end_date is not None:
+        if start_date is None:
+            start_date = (pd.Timestamp(end_date) - pd.tseries.offsets.BDay(n_days - 1)).strftime('%Y-%m-%d')
+        dates = pd.date_range(start=start_date, end=end_date, freq='B')
+        if len(dates) == 0:
+            raise ValueError("start_date/end_date must include at least one business day")
+        n_days = len(dates)
+    else:
+        if start_date is None:
+            start_date = (datetime.now() - timedelta(days=n_days)).strftime('%Y-%m-%d')
+        dates = pd.date_range(start=start_date, periods=n_days, freq='B')  # 工作日
+    stocks = securities or generate_sample_security_codes(n_stocks)
+    n_stocks = len(stocks)
     
     # 生成价格数据（随机游走）
     price_data = pd.DataFrame(index=dates, columns=stocks)

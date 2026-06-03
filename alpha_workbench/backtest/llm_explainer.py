@@ -13,6 +13,7 @@ Backtest Explainer for AlphaWorkbench Role 5
 """
 import logging
 import os
+import re
 import threading
 import warnings
 from typing import Optional, Dict, Any
@@ -685,15 +686,20 @@ class BacktestExplainer:
         recommendations = ""
 
         try:
-            # 尝试按章节解析
-            sections = {
-                "总体评价": "summary",
-                "IC指标分析": "ic_analysis",
-                "分层收益分析": "layer_analysis",
-                "多空组合分析": "long_short_analysis",
-                "换手率分析": "turnover_analysis",
-                "风险评估": "risk_assessment",
-                "改进建议": "recommendations"
+            # 尝试按章节解析。LLM 对标题措辞不稳定，例如可能输出
+            # “IC分析”而不是 prompt 中的“IC指标分析”，这里统一做别名匹配。
+            section_aliases = {
+                "summary": ["总体评价", "整体评价", "综合评价"],
+                "ic_analysis": ["IC分析", "IC指标分析", "IC 指标分析", "IC与稳定性分析", "预测能力分析"],
+                "layer_analysis": ["分层分析", "分层收益分析", "分层效果分析"],
+                "long_short_analysis": ["多空分析", "多空组合分析", "多空收益分析"],
+                "turnover_analysis": ["换手率分析", "交易成本分析"],
+                "risk_assessment": ["风险评估", "风险分析"],
+                "recommendations": ["改进建议", "优化建议", "建议"],
+            }
+            normalized_aliases = {
+                en_name: [_normalize_section_heading(alias) for alias in aliases]
+                for en_name, aliases in section_aliases.items()
             }
 
             current_section = None
@@ -704,8 +710,12 @@ class BacktestExplainer:
 
                 # 检测章节标题
                 is_section_header = False
-                for cn_name, en_name in sections.items():
-                    if cn_name in line_stripped and ('##' in line or '###' in line or line_stripped.startswith(cn_name)):
+                normalized_heading = _normalize_section_heading(line_stripped)
+                for en_name, aliases in normalized_aliases.items():
+                    if (
+                        ("##" in line or "###" in line or line_stripped[:2].isdigit())
+                        and any(alias in normalized_heading for alias in aliases)
+                    ) or any(normalized_heading.startswith(alias) for alias in aliases):
                         # 保存上一个章节的内容
                         if current_section and section_content:
                             content = '\n'.join(section_content).strip()
@@ -725,7 +735,11 @@ class BacktestExplainer:
                                 recommendations = content
 
                         current_section = en_name
-                        section_content = []
+                        inline_content = _extract_inline_section_content(
+                            line_stripped,
+                            section_aliases[en_name],
+                        )
+                        section_content = [inline_content] if inline_content else []
                         is_section_header = True
                         break
 
@@ -788,6 +802,24 @@ class BacktestExplainer:
             result.add_generation_metadata("warning", warning)
 
         return result
+
+
+def _normalize_section_heading(value: str) -> str:
+    """Normalize LLM section headings for robust alias matching."""
+    heading = re.sub(r"^[#\s\d.、:：()-]+", "", value.strip(), flags=re.ASCII)
+    heading = re.sub(r"[\s:：#*_\-—/（）()]+", "", heading)
+    return heading.upper()
+
+
+def _extract_inline_section_content(line: str, aliases: list[str]) -> str:
+    """Return content after a same-line section heading, if present."""
+    content = re.sub(r"^[#\s\d.、:：()-]+", "", line.strip(), flags=re.ASCII).strip()
+    for alias in aliases:
+        alias_pattern = r"\s*".join(re.escape(char) for char in alias.replace(" ", ""))
+        match = re.match(rf"^{alias_pattern}\s*[:：-]?\s*(.*)$", content, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return ""
 
     def _format_explanation_to_text(self, result: BacktestExplanationResult, include_metadata: bool = True) -> str:
         """将结构化解释格式化为文本输出（用于兼容旧代码）

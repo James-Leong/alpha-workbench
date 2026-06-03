@@ -142,7 +142,7 @@ class FactorSpec(BaseModel):
     factor_id: str = Field(
         ...,
         description="因子唯一标识",
-        pattern="^[A-Z][A-Z0-9_]*$"
+        pattern="^[A-Za-z][A-Za-z0-9_]*$"
     )
     factor_name: str = Field(..., description="因子名称")
     formula_latex: Optional[str] = Field(
@@ -201,6 +201,26 @@ class ResearchSpec(BaseModel):
         default_factory=list,
         description="自定义规则列表"
     )
+    rebalance_frequency: str = Field(
+        default="monthly",
+        description="调仓频率，如 daily/weekly/monthly"
+    )
+    holding_period: str = Field(
+        default="20D",
+        description="持有期，如 20D 或 20 trading days"
+    )
+    transaction_cost_bps: float = Field(
+        default=10.0,
+        description="交易成本，单位为基点"
+    )
+    initial_cash: float = Field(
+        default=1000000.0,
+        description="初始资金"
+    )
+    sample_window: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="样本区间，包含 start/end"
+    )
     backtest: Dict[str, Any] = Field(
         default_factory=dict,
         description="回测配置参数"
@@ -221,6 +241,11 @@ class ResearchSpec(BaseModel):
             "filters": self.filters,
             "data_preference": self.data_preference,
             "custom_rules": self.custom_rules,
+            "rebalance_frequency": self.rebalance_frequency,
+            "holding_period": self.holding_period,
+            "transaction_cost_bps": self.transaction_cost_bps,
+            "initial_cash": self.initial_cash,
+            "sample_window": self.sample_window,
             "backtest": self.backtest
         }
 

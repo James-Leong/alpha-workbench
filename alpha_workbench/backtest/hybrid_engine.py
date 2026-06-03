@@ -30,6 +30,7 @@ from alpha_workbench.backtest.mercury_adapter import (
     MercuryStrategyInput,
     MercurySummary,
 )
+from alpha_workbench.backtest.rebalance import FactorRebalancer, RebalanceConfig
 
 
 class HybridBacktestEngine:
@@ -104,9 +105,20 @@ class HybridBacktestEngine:
         
         # 1. 数据预处理
         factor_data, returns_data = self._prepare_data(input_data)
+
+        mercury_response = None
+        if self.use_mercury and self.mercury:
+            logger.info("[1/2] Mercury交易回测...")
+            mercury_response = self._run_mercury_backtest(input_data, factor_data)
+            if mercury_response and not mercury_response.error and mercury_response.summary:
+                logger.info("[2/2] 使用Mercury结果生成报告...")
+                return self._build_mercury_report(input_data, factor_data, returns_data, mercury_response)
+            logger.info("Mercury回测失败或无结果，将使用本地回测 fallback")
+        else:
+            logger.info("Mercury服务不可用，使用本地回测 fallback")
         
-        # 2. 本地因子分析
-        logger.info("[1/3] 本地因子分析...")
+        # 2. 本地因子分析（仅在Mercury不可用或失败时执行）
+        logger.info("[1/3] 本地因子分析 fallback...")
         ic_metrics = self._calculate_ic_metrics(factor_data, returns_data)
         layer_metrics = self._calculate_layer_metrics(
             factor_data, returns_data, input_data.n_quantiles
@@ -114,22 +126,11 @@ class HybridBacktestEngine:
         long_short_metrics = self._calculate_long_short_metrics(
             factor_data, returns_data, input_data.n_quantiles
         )
-        
-        # 3. Mercury交易回测（如果可用）
-        mercury_summary = None
-        mercury_response = None
-        if self.use_mercury and self.mercury:
-            logger.info("[2/3] Mercury交易回测...")
-            mercury_response = self._run_mercury_backtest(input_data, factor_data)
-            if mercury_response and not mercury_response.error:
-                mercury_summary = mercury_response.summary
-        else:
-            logger.info("[2/3] 跳过Mercury回测（服务不可用）")
 
         # 4. 合并指标
         logger.info("[3/3] 生成综合报告...")
         metrics = self._merge_metrics(
-            ic_metrics, layer_metrics, long_short_metrics, mercury_summary
+            ic_metrics, layer_metrics, long_short_metrics, None
         )
         
         # 5. 生成图表
@@ -146,7 +147,7 @@ class HybridBacktestEngine:
         explanation = None
         if self.enable_llm_explanation and self.explainer:
             explanation = self._generate_explanation(
-                metrics, input_data.factor_spec, mercury_summary, backtest_period
+                metrics, input_data.factor_spec, None, backtest_period
             )
 
         # 7. 组装报告
@@ -161,12 +162,77 @@ class HybridBacktestEngine:
             raw_data={
                 "factor_data": factor_data,
                 "returns_data": returns_data,
-                "mercury_summary": mercury_summary.model_dump() if mercury_summary else None,
+                "engine": "local_fallback",
+                "mercury_summary": None,
                 "mercury_response": mercury_response.model_dump(mode="json") if mercury_response else None,
             } if self.enable_plotting else None
         )
         
         return report
+
+    def _build_mercury_report(
+        self,
+        input_data: BacktestInput,
+        factor_data: pd.DataFrame,
+        returns_data: pd.DataFrame,
+        mercury_response: MercuryBacktestResponse,
+    ) -> BacktestReport:
+        """Build a report from Mercury output without running local metrics."""
+        summary = mercury_response.summary
+        ic_metrics = self._calculate_ic_metrics(factor_data, returns_data)
+        layer_metrics = self._calculate_layer_metrics(
+            factor_data, returns_data, input_data.n_quantiles
+        )
+        factor_long_short_metrics = self._calculate_long_short_metrics(
+            factor_data, returns_data, input_data.n_quantiles
+        )
+        metrics = self._merge_metrics(
+            ic_metrics, layer_metrics, factor_long_short_metrics, summary
+        )
+        metrics.turnover_analysis = {
+            "total_turnover": summary.total_turnover,
+            "total_trades": summary.total_trades,
+            "source": "mercury",
+        }
+        figures = BacktestFigures()
+        if self.enable_plotting:
+            figures = self._generate_figures(
+                factor_data, returns_data, metrics, input_data
+            )
+
+        metrics = BacktestMetrics(
+            ic_metrics=metrics.ic_metrics,
+            layer_metrics=metrics.layer_metrics,
+            long_short_metrics=metrics.long_short_metrics,
+            turnover_analysis={
+                "total_turnover": summary.total_turnover,
+                "total_trades": summary.total_trades,
+                "source": "mercury",
+            },
+        )
+
+        backtest_period = self._format_backtest_period(factor_data)
+        explanation = None
+        if self.enable_llm_explanation and self.explainer:
+            explanation = self._generate_explanation(
+                metrics, input_data.factor_spec, summary, backtest_period
+            )
+
+        return BacktestReport(
+            factor_id=input_data.factor_spec.factor_id,
+            factor_name=input_data.factor_spec.factor_name,
+            backtest_period=backtest_period,
+            metrics=metrics,
+            figures=figures,
+            explanation=explanation,
+            raw_data={
+                "factor_data": factor_data,
+                "returns_data": returns_data,
+                "engine": "mercury",
+                "mercury_summary": summary.model_dump(),
+                "mercury_response": mercury_response.model_dump(mode="json"),
+            } if self.enable_plotting else {"engine": "mercury", "mercury_response": mercury_response.model_dump(mode="json")},
+        )
     
     def _prepare_data(self, input_data: BacktestInput) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """数据预处理"""
@@ -372,19 +438,32 @@ class HybridBacktestEngine:
             return None
         
         try:
-            # 构建股票列表
-            all_stocks = factor_data.columns.tolist()
+            research_spec = input_data.research_spec
+            schedule = self._resolve_rebalance_schedule(
+                research_spec.rebalance_frequency if research_spec else None,
+                research_spec.holding_period if research_spec else None,
+            )
+            transaction_cost_bps = (
+                research_spec.transaction_cost_bps
+                if research_spec
+                else input_data.commission_rate * 10000
+            )
+            initial_cash = research_spec.initial_cash if research_spec else 1000000.0
+
+            latest_factor = factor_data.dropna(how="all").iloc[-1]
+            rebalancer = FactorRebalancer(RebalanceConfig(top_n=min(20, len(latest_factor.dropna()))))
+            selected_assets = rebalancer.select_stocks(latest_factor)
             
             # 将因子转换为策略操作
-            # 这里使用简单的每周调仓策略，做多因子值最高的股票
+            # 使用前端配置的调仓频率，做多最新一期因子值最高的股票
             ops = [
                 {
                     "op": "load_universe",
-                    "assets": all_stocks[:20]  # 取前20只股票
+                    "assets": selected_assets
                 },
                 {
                     "op": "schedule",
-                    "schedule": "weekly"
+                    "schedule": schedule
                 },
                 {
                     "op": "weight",
@@ -401,14 +480,14 @@ class HybridBacktestEngine:
             )
             
             # 构建RunSpec
-            start_date = factor_data.index[0].strftime('%Y%m%d')
-            end_date = factor_data.index[-1].strftime('%Y%m%d')
+            start_date = self._format_mercury_date(input_data.start_date, factor_data.index[0])
+            end_date = self._format_mercury_date(input_data.end_date, factor_data.index[-1])
             
             run_config = MercuryRunConfig(
                 start_date=start_date,
                 end_date=end_date,
-                initial_cash=1000000.0,
-                transaction_cost_bps=input_data.commission_rate * 10000  # 转换为基点
+                initial_cash=initial_cash,
+                transaction_cost_bps=transaction_cost_bps
             )
             
             run_spec = MercuryRunSpec(
@@ -418,6 +497,8 @@ class HybridBacktestEngine:
             
             # 调用Mercury服务
             response = self.mercury.create_and_wait(run_spec)
+            if response is None:
+                return None
             
             if response.error:
                 logger.warning("Mercury回测失败: %s", response.message)
@@ -433,6 +514,63 @@ class HybridBacktestEngine:
         except Exception as e:
             logger.warning("Mercury回测异常: %s", e)
             return None
+
+    @staticmethod
+    def _resolve_rebalance_schedule(schedule: str | None, holding_period: str | None) -> str:
+        """Resolve frontend frequency, falling back to holding-period hints."""
+        if schedule:
+            return HybridBacktestEngine._normalize_rebalance_schedule(schedule)
+        holding = (holding_period or "").strip().lower().replace(" ", "")
+        if holding in {"1m", "1mo", "monthly", "month"}:
+            return "monthly"
+        if holding in {"1q", "3m", "quarter", "quarterly", "qtr"}:
+            return "quarterly"
+        if holding in {"once", "buyandhold", "buy_hold", "hold"}:
+            return "once"
+        if holding in {"1w", "5d", "weekly", "week"}:
+            return "weekly"
+        if holding in {"1d", "daily", "day"}:
+            return "daily"
+        if holding.endswith("d"):
+            try:
+                days = int(holding[:-1])
+                if days >= 15:
+                    return "weekly"
+                if days >= 5:
+                    return "weekly"
+                return "daily"
+            except ValueError:
+                pass
+        return "weekly"
+
+    @staticmethod
+    def _normalize_rebalance_schedule(schedule: str) -> str:
+        """Map frontend rebalance labels to Mercury schedule names."""
+        normalized = (schedule or "weekly").lower()
+        aliases = {
+            "1d": "daily",
+            "daily": "daily",
+            "1w": "weekly",
+            "week": "weekly",
+            "weekly": "weekly",
+            "1m": "monthly",
+            "month": "monthly",
+            "monthly": "monthly",
+            "1q": "quarterly",
+            "quarter": "quarterly",
+            "quarterly": "quarterly",
+            "qtr": "quarterly",
+            "once": "once",
+            "buy_and_hold": "once",
+            "buyandhold": "once",
+        }
+        return aliases.get(normalized, normalized)
+
+    @staticmethod
+    def _format_mercury_date(value, fallback) -> str:
+        """Format configured date or fallback timestamp for Mercury."""
+        date_value = value if value is not None else fallback
+        return pd.Timestamp(date_value).strftime('%Y%m%d')
     
     def _merge_metrics(
         self,

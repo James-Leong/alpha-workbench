@@ -48,6 +48,7 @@ DEFAULT_RESEARCH_SPEC: dict[str, Any] = {
     "neutralization": ["industry"],
     "filters": ["exclude_suspended", "exclude_st"],
     "transaction_cost_bps": 10,
+    "initial_cash": 1_000_000,
     "benchmark": "沪深300",
     "sample_window": {
         "start": "2021-01-01",

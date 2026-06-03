@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import logging
+import hashlib
+from datetime import date
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from alpha_workbench.backtest.factor_backtest import mock_run_backtest
 from alpha_workbench.backtest.hybrid_engine import HybridBacktestEngine
 from alpha_workbench.backtest.mercury_adapter import MercuryConfig
 from alpha_workbench.data.sample_data import generate_sample_data, create_mock_factorspec
+from alpha_workbench.data.universe import resolve_universe
 from alpha_workbench.schemas.backtest_schemas import BacktestInput, FactorSpec, ResearchSpec
 
 logger = logging.getLogger(__name__)
@@ -27,14 +31,14 @@ def run_backtest(
 ) -> dict[str, Any]:
     """Run backtest for multiple factors using HybridBacktestEngine.
 
-    Two-pass strategy:
-      1. Local metrics for ALL factors (fast — IC, layers, long-short, charts).
-      2. Mercury remote backtest ONLY for the best factor (by sharpe_ratio).
+    Strategy:
+      1. Run Mercury backtest for every factor when enabled.
+      2. Fall back to local metrics only when Mercury is unavailable or fails.
 
     Returns a dict with:
         research_universe: str
         factor_results:    list[dict]  -- per-factor metrics sorted by sharpe desc
-        mercury_results:   dict        -- Mercury summary for the best factor only
+        mercury_results:   dict        -- Mercury summary keyed by factor id
         charts:            dict        -- serialisable chart references
         is_mock:           bool
         notes:             list[str]
@@ -51,46 +55,73 @@ def run_backtest(
     rs = research_spec or {}
     n_quantiles = rs.get("backtest", {}).get("groups", 5)
     universe = rs.get("universe", "sample_universe")
+    securities = resolve_universe(universe)
+    research_model = _build_research_spec(rs)
+    start_date = _parse_date(rs.get("sample_window", {}).get("start"))
+    end_date = _parse_date(rs.get("sample_window", {}).get("end"))
+    commission_rate = float(rs.get("transaction_cost_bps", 10)) / 10000
 
     # ── shared data caches (regenerated on first use) ──────────────────────
     shared_price: pd.DataFrame | None = price_data
     shared_returns: pd.DataFrame | None = returns_data
     used_mock_data = False
 
-    # ── local engine (never touches Mercury) ───────────────────────────────
-    local_engine = HybridBacktestEngine(
-        enable_plotting=True,
-        enable_llm_explanation=False,
-        mercury_config=None,
-        use_mercury=False,
-    )
-
     factor_results: list[dict[str, Any]] = []
+    mercury_results: dict[str, Any] = {}
     charts: dict[str, Any] = {}
     notes: list[str] = []
 
     try:
-        # ── Pass 1: local metrics for every factor ─────────────────────────
-        for factor_dict in factor_specs:
+        mercury_engine = None
+        local_engine = None
+
+        if enable_mercury:
+            mercury_engine = HybridBacktestEngine(
+                enable_plotting=True,
+                enable_llm_explanation=False,
+                mercury_config=MercuryConfig(),
+                use_mercury=True,
+            )
+
+        local_engine = HybridBacktestEngine(
+            enable_plotting=True,
+            enable_llm_explanation=False,
+            mercury_config=None,
+            use_mercury=False,
+        )
+
+        # ── Run every factor, preferring Mercury and falling back locally ───
+        for factor_idx, factor_dict in enumerate(factor_specs):
             fid = factor_dict.get("factor_id", "UNKNOWN")
             fname = factor_dict.get("factor_name", fid)
-            logger.info("Local backtest: %s (%s)", fname, fid)
+            logger.info("Backtest: %s (%s)", fname, fid)
 
             if factor_data_dict and fid in factor_data_dict:
                 fdata = factor_data_dict[fid]
             else:
                 used_mock_data = True
-                fdata, pdata, rdata = generate_sample_data(
-                    n_stocks=50, n_days=120, seed=hash(fid) % 2**31,
-                )
                 if shared_price is None:
-                    shared_price = pdata
+                    _, shared_price, shared_returns = generate_sample_data(
+                        n_stocks=len(securities),
+                        n_days=120,
+                        start_date=start_date.isoformat() if start_date else None,
+                        end_date=end_date.isoformat() if end_date else None,
+                        securities=securities,
+                        seed=_stable_seed(f"{universe}:shared_market"),
+                    )
                 if shared_returns is None:
-                    shared_returns = rdata
+                    shared_returns = shared_price.pct_change().shift(-1)
+                fdata = _generate_synthetic_factor_data(shared_returns, fid, factor_idx)
 
             if shared_price is None:
                 used_mock_data = True
-                _, shared_price, shared_returns = generate_sample_data(n_stocks=50, n_days=120)
+                _, shared_price, shared_returns = generate_sample_data(
+                    n_stocks=len(securities),
+                    n_days=120,
+                    start_date=start_date.isoformat() if start_date else None,
+                    end_date=end_date.isoformat() if end_date else None,
+                    securities=securities,
+                )
 
             common_dates = fdata.index.intersection(shared_price.index)
             common_stocks = fdata.columns.intersection(shared_price.columns)
@@ -114,10 +145,33 @@ def run_backtest(
                 factor_data=fdata,
                 price_data=price_use,
                 returns_data=rdata_use,
+                research_spec=research_model,
+                start_date=start_date,
+                end_date=end_date,
                 n_quantiles=n_quantiles,
+                commission_rate=commission_rate,
             )
 
-            report = local_engine.run_backtest(input_data)
+            report, engine_name = _run_with_mercury_fallback(
+                input_data=input_data,
+                mercury_engine=mercury_engine,
+                local_engine=local_engine,
+                notes=notes,
+            )
+
+            raw = report.raw_data or {}
+            mr = raw.get("mercury_response")
+            if mr and mr.get("summary"):
+                enriched = dict(mr["summary"])
+                if mr.get("execution_view"):
+                    enriched["execution_view"] = mr["execution_view"]
+                if mr.get("metrics"):
+                    enriched["metrics"] = mr["metrics"]
+                if mr.get("job_id"):
+                    enriched["job_id"] = mr["job_id"]
+                if mr.get("status"):
+                    enriched["status"] = mr["status"]
+                mercury_results[fid] = enriched
 
             ic = report.metrics.ic_metrics
             ls = report.metrics.long_short_metrics
@@ -141,6 +195,7 @@ def run_backtest(
                 "max_drawdown": ls.max_drawdown,
                 "annual_volatility": ls.annual_volatility,
                 "layer_returns": layer.layer_returns,
+                "engine": engine_name,
             })
 
             if report.figures.ic_series_plot is not None:
@@ -151,68 +206,6 @@ def run_backtest(
                 charts[f"{fid}_long_short_nav"] = report.figures.long_short_nav_plot
 
         factor_results.sort(key=lambda r: r.get("sharpe_ratio", 0.0), reverse=True)
-
-        # ── Pass 2: Mercury ONLY for the best factor ───────────────────────
-        mercury_results: dict[str, Any] = {}
-        if enable_mercury and factor_results:
-            best = factor_results[0]
-            best_fid = best["factor_id"]
-            logger.info("Mercury pass: best factor = %s (sharpe=%.3f)", best_fid, best["sharpe_ratio"])
-
-            best_spec = next(
-                (f for f in factor_specs if f.get("factor_id") == best_fid),
-                factor_specs[0],
-            )
-            best_fdata = (
-                factor_data_dict.get(best_fid) if factor_data_dict and best_fid in factor_data_dict
-                else None
-            )
-            if best_fdata is None:
-                best_fdata, _, _ = generate_sample_data(
-                    n_stocks=50, n_days=120, seed=hash(best_fid) % 2**31,
-                )
-
-            mercury_config = MercuryConfig()
-            mercury_engine = HybridBacktestEngine(
-                enable_plotting=True,   # required for raw_data passthrough
-                enable_llm_explanation=False,
-                mercury_config=mercury_config,
-                use_mercury=True,
-            )
-            try:
-                common_dates = best_fdata.index.intersection(shared_price.index)
-                common_stocks = best_fdata.columns.intersection(shared_price.columns)
-                best_fdata = best_fdata.loc[common_dates, common_stocks]
-                best_price = shared_price.loc[common_dates, common_stocks]
-
-                best_input = BacktestInput(
-                    factor_spec=_build_factor_spec(best_spec),
-                    factor_data=best_fdata,
-                    price_data=best_price,
-                    n_quantiles=n_quantiles,
-                )
-                mercury_report = mercury_engine.run_backtest(best_input)
-
-                raw = mercury_report.raw_data
-                if raw:
-                    mr = raw.get("mercury_response")
-                    if mr and mr.get("summary"):
-                        enriched = dict(mr["summary"])
-                        if mr.get("execution_view"):
-                            enriched["execution_view"] = mr["execution_view"]
-                        if mr.get("metrics"):
-                            enriched["metrics"] = mr["metrics"]
-                        if mr.get("job_id"):
-                            enriched["job_id"] = mr["job_id"]
-                        if mr.get("status"):
-                            enriched["status"] = mr["status"]
-                        mercury_results[best_fid] = enriched
-                        logger.info("Mercury result for %s: sharpe=%.3f", best_fid,
-                                      enriched.get("sharpe", 0))
-            except Exception:
-                logger.exception("Mercury pass failed for %s", best_fid)
-            finally:
-                mercury_engine.close()
 
         n_m = len(mercury_results)
         logger.info("Backtest complete: %d factors, %d Mercury results, mock=%s",
@@ -256,17 +249,23 @@ def run_backtest(
         }
 
     finally:
-        local_engine.close()
+        if "mercury_engine" in locals() and mercury_engine is not None:
+            mercury_engine.close()
+        if "local_engine" in locals() and local_engine is not None:
+            local_engine.close()
 
     if used_mock_data:
-        notes.append("No real factor data provided; used synthetic sample data.")
+        notes.append("No real factor data provided; used synthetic factor signals.")
+
+    result_is_mock = used_mock_data and not mercury_results
 
     return {
         "research_universe": universe,
         "factor_results": factor_results,
         "mercury_results": mercury_results,
         "charts": charts,
-        "is_mock": used_mock_data,
+        "is_mock": result_is_mock,
+        "uses_synthetic_factor_data": used_mock_data,
         "notes": notes,
     }
 
@@ -282,3 +281,71 @@ def _build_factor_spec(factor_dict: dict[str, Any]) -> FactorSpec:
             "description", ""
         )
         return FactorSpec.from_dict(mock)
+
+
+def _generate_synthetic_factor_data(
+    returns_data: pd.DataFrame,
+    factor_id: str,
+    factor_idx: int,
+) -> pd.DataFrame:
+    """Create synthetic factor values aligned with one shared return matrix."""
+    rng = np.random.default_rng(_stable_seed(f"{factor_id}:{factor_idx}:factor"))
+    clean_returns = returns_data.copy()
+    cross_sectional_std = clean_returns.stack().std()
+    noise_scale = float(cross_sectional_std) if pd.notna(cross_sectional_std) else 0.02
+    noise = rng.normal(0.0, noise_scale, clean_returns.shape)
+
+    signal_strength = max(0.35, 0.8 - factor_idx * 0.18)
+    factor_values = signal_strength * clean_returns.fillna(0.0).to_numpy() + noise
+    factor_data = pd.DataFrame(
+        factor_values,
+        index=clean_returns.index,
+        columns=clean_returns.columns,
+    )
+    factor_data = factor_data.mask(clean_returns.isna())
+
+    missing_mask = rng.random(factor_data.shape) < 0.03
+    return factor_data.mask(missing_mask)
+
+
+def _stable_seed(value: str) -> int:
+    """Return a process-stable integer seed for repeatable demo data."""
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return int(digest[:8], 16)
+
+
+def _run_with_mercury_fallback(
+    *,
+    input_data: BacktestInput,
+    mercury_engine: HybridBacktestEngine | None,
+    local_engine: HybridBacktestEngine,
+    notes: list[str],
+) -> tuple[Any, str]:
+    """Run one factor through Mercury first, falling back to local on failure."""
+    fid = input_data.factor_spec.factor_id
+    if mercury_engine is not None and mercury_engine.use_mercury:
+        try:
+            report = mercury_engine.run_backtest(input_data)
+            raw = report.raw_data or {}
+            if raw.get("mercury_response", {}).get("summary"):
+                return report, "mercury"
+            notes.append(f"Mercury returned no result for {fid}; used local fallback.")
+        except Exception as exc:
+            logger.exception("Mercury backtest failed for %s; falling back to local", fid)
+            notes.append(f"Mercury failed for {fid}: {exc}; used local fallback.")
+
+    return local_engine.run_backtest(input_data), "local_fallback"
+
+
+def _build_research_spec(research_spec: dict[str, Any]) -> ResearchSpec | None:
+    """Convert frontend research config dict to ResearchSpec when available."""
+    if not research_spec:
+        return None
+    return ResearchSpec.from_dict(research_spec)
+
+
+def _parse_date(value: Any) -> date | None:
+    """Parse optional frontend date values into date objects."""
+    if not value:
+        return None
+    return pd.to_datetime(value).date()

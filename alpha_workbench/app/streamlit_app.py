@@ -17,6 +17,8 @@ from alpha_workbench.agents.factor_generator import generate_factors
 from alpha_workbench.agents.idea_extractor import extract_idea
 from alpha_workbench.agents.audit_agent import run_audit
 from alpha_workbench.agents.report_agent import generate_report
+from alpha_workbench.app.research_config import apply_research_config_edits
+from alpha_workbench.app.status import backtest_source_summary, group_charts_by_factor
 from alpha_workbench.backtest.engine import run_backtest
 from alpha_workbench.factor_engine.compiler import compile_factors
 from alpha_workbench.memory.research_trace import save_research_trace
@@ -134,6 +136,7 @@ def _run_research(input_text: str, save_trace: bool) -> dict[str, Any]:
         with col_r:
             st.markdown(f"- **调仓频率：** `{rs.get('rebalance_frequency', '—')}`")
             st.markdown(f"- **交易成本：** `{rs.get('transaction_cost_bps', 10)} bps`")
+            st.markdown(f"- **初始资金：** `{rs.get('initial_cash', 1000000):,.0f}`")
             sw = rs.get("sample_window", {})
             st.markdown(f"- **样本区间：** `{sw.get('start', '—')}` ~ `{sw.get('end', '—')}`")
         with st.expander("查看完整 ResearchSpec"):
@@ -268,6 +271,7 @@ def _render_chat_trace(trace: dict[str, Any]) -> None:
         with col_r:
             st.markdown(f"- **调仓频率：** `{research.get('rebalance_frequency', '—')}`")
             st.markdown(f"- **交易成本：** `{research.get('transaction_cost_bps', 10)} bps`")
+            st.markdown(f"- **初始资金：** `{research.get('initial_cash', 1000000):,.0f}`")
             sw = research.get("sample_window", {})
             st.markdown(f"- **样本区间：** `{sw.get('start', '—')}` ~ `{sw.get('end', '—')}`")
         with st.expander("查看完整 ResearchSpec"):
@@ -282,6 +286,8 @@ def _render_chat_trace(trace: dict[str, Any]) -> None:
         st.markdown("**BacktestEngine**")
         br = trace["backtest_result"]
         best = br["factor_results"][0]
+        source_summary = backtest_source_summary(br)
+        st.caption(f"回测来源：{source_summary['label']}")
         st.write(f"最佳因子：**{best['factor_name']}**，IC 均值：{best['ic_mean']:.4f}，夏普：{best.get('sharpe_ratio', 0):.2f}，最大回撤：{best['max_drawdown']:.2%}")
         mercury = br.get("mercury_results", {})
         if mercury:
@@ -337,6 +343,7 @@ def _render_research_config(trace: dict[str, Any]) -> None:
     with right:
         st.text_input("调仓频率", value=research["rebalance_frequency"], disabled=True)
         st.number_input("交易成本 bps", value=research["transaction_cost_bps"], disabled=True)
+        st.number_input("初始资金", value=float(research.get("initial_cash", 1000000)), disabled=True)
         st.text_input("样本区间", value=f"{research['sample_window']['start']} 至 {research['sample_window']['end']}", disabled=True)
 
     with st.expander("查看完整 ResearchSpec"):
@@ -384,7 +391,7 @@ def _render_backtest(trace: dict[str, Any]) -> None:
     if len(metrics_list) > 0:
         display = pd.DataFrame(metrics_list)
         keep_cols = [
-            "factor_name", "ic_mean", "rank_ic_mean", "icir", "rank_icir",
+            "factor_name", "engine", "ic_mean", "rank_ic_mean", "icir", "rank_icir",
             "ic_positive_ratio", "long_short_return", "sharpe_ratio",
             "max_drawdown", "annual_volatility",
         ]
@@ -393,6 +400,7 @@ def _render_backtest(trace: dict[str, Any]) -> None:
             display = display[avail_cols].rename(
                 columns={
                     "factor_name": "因子",
+                    "engine": "来源",
                     "ic_mean": "IC均值",
                     "rank_ic_mean": "RankIC均值",
                     "icir": "ICIR",
@@ -410,8 +418,15 @@ def _render_backtest(trace: dict[str, Any]) -> None:
     charts = backtest_result.get("charts", {})
     if charts:
         with st.expander("回测图表", expanded=True):
-            for chart_key, fig in charts.items():
-                st.plotly_chart(fig, width='stretch', key=chart_key)
+            chart_groups = [group for group in group_charts_by_factor(charts, metrics_list) if group["charts"]]
+            tabs = st.tabs([group["factor_name"] for group in chart_groups])
+            for tab, group in zip(tabs, chart_groups):
+                with tab:
+                    if group.get("engine"):
+                        st.caption(f"来源：{group['engine']}")
+                    for chart in group["charts"]:
+                        st.markdown(f"**{chart['label']}**")
+                        st.plotly_chart(chart["figure"], width='stretch', key=chart["key"])
     else:
         # Fallback: simple line chart from nav_series if available
         nav = backtest_result.get("nav_series", [])
@@ -435,13 +450,8 @@ def _render_report(trace: dict[str, Any]) -> None:
 def _render_data_source(trace: dict[str, Any]) -> None:
     """Show data source indicators: Mercury / Local / Mock."""
     br = trace.get("backtest_result", {})
-    chips = []
-    if br.get("mercury_results"):
-        chips.append('<span class="status-chip active">交易级回测</span>')
-    if br.get("is_mock"):
-        chips.append('<span class="status-chip active">Mock 数据</span>')
-    else:
-        chips.append('<span class="status-chip active">本地因子分析</span>')
+    summary = backtest_source_summary(br)
+    chips = [f'<span class="status-chip active">{chip}</span>' for chip in summary["chips"]]
     if chips:
         st.markdown("".join(chips), unsafe_allow_html=True)
 
@@ -502,16 +512,32 @@ def _render_workflow() -> None:
             with col_r:
                 rebalance = st.text_input("调仓频率", value=rs_raw.get("rebalance_frequency", ""), key="wf_rebal")
                 cost = st.number_input("交易成本 bps", value=int(rs_raw.get("transaction_cost_bps", 10)), key="wf_cost")
+                initial_cash = st.number_input(
+                    "初始资金",
+                    min_value=10000.0,
+                    value=float(rs_raw.get("initial_cash", 1000000)),
+                    step=100000.0,
+                    key="wf_initial_cash",
+                )
                 sw = rs_raw.get("sample_window", {})
-                st.text_input("样本区间", value=f"{sw.get('start', '—')} 至 {sw.get('end', '—')}", disabled=True, key="wf_window")
+                sample_start = st.text_input("样本开始", value=sw.get("start", ""), key="wf_sample_start")
+                sample_end = st.text_input("样本结束", value=sw.get("end", ""), key="wf_sample_end")
             st.info("请确认以上研究配置，点击下方按钮继续执行回测")
             if st.button("确认配置，继续回测", type="primary"):
-                rs_raw["universe"] = universe
-                rs_raw["holding_period"] = holding
-                rs_raw["benchmark"] = benchmark
-                rs_raw["rebalance_frequency"] = rebalance
-                rs_raw["transaction_cost_bps"] = int(cost)
-                wf.wf_data["research_spec"] = rs_raw
+                updated_research_spec = apply_research_config_edits(
+                    rs_raw,
+                    universe=universe,
+                    holding_period=holding,
+                    benchmark=benchmark,
+                    rebalance_frequency=rebalance,
+                    transaction_cost_bps=int(cost),
+                    sample_start=sample_start,
+                    sample_end=sample_end,
+                )
+                updated_research_spec["initial_cash"] = float(initial_cash)
+                updated_research_spec.setdefault("backtest", {})
+                updated_research_spec["backtest"]["initial_cash"] = float(initial_cash)
+                wf.wf_data["research_spec"] = updated_research_spec
                 wf.wf_step = 3
                 st.rerun()
         return  # Pause — wait for user to click confirm
@@ -529,6 +555,7 @@ def _render_workflow() -> None:
         with col_r:
             st.markdown(f"- **调仓频率：** `{rs.get('rebalance_frequency', '—')}`")
             st.markdown(f"- **交易成本：** `{rs.get('transaction_cost_bps', 10)} bps`")
+            st.markdown(f"- **初始资金：** `{rs.get('initial_cash', 1000000):,.0f}`")
             sw = rs.get("sample_window", {})
             st.markdown(f"- **样本区间：** `{sw.get('start', '—')}` ~ `{sw.get('end', '—')}`")
 
@@ -548,15 +575,17 @@ def _render_workflow() -> None:
         factor_names = "、".join(f["factor_name"] for f in wf.wf_data["factor_specs"])
         st.write(f"已生成候选因子：{factor_names}。")
 
-    # === Step 4: Backtest (local metrics + Mercury for best factor) ===
+    # === Step 4: Backtest (Mercury first, local fallback if needed) ===
     if "backtest_result" not in wf.wf_data:
         with st.chat_message("assistant"):
             st.markdown("**BacktestEngine**")
-            with st.spinner("正在执行本地因子分析..."):
+            with st.spinner("正在执行 Mercury 回测，失败时自动切换本地 fallback..."):
                 wf.wf_data["compiled_factors"] = compile_factors(wf.wf_data["factor_specs"])
                 wf.wf_data["backtest_result"] = run_backtest(wf.wf_data["factor_specs"], wf.wf_data["research_spec"])
             br = wf.wf_data["backtest_result"]
             best = br["factor_results"][0]
+            source_summary = backtest_source_summary(br)
+            st.caption(f"回测来源：{source_summary['label']}")
             st.write(f"最佳因子：**{best['factor_name']}**，IC 均值：{best['ic_mean']:.4f}，夏普：{best.get('sharpe_ratio', 0):.2f}，最大回撤：{best['max_drawdown']:.2%}")
 
             # --- Inline Mercury result (only the best factor) ---
@@ -584,6 +613,8 @@ def _render_workflow() -> None:
         st.markdown("**BacktestEngine**")
         br = wf.wf_data["backtest_result"]
         best = br["factor_results"][0]
+        source_summary = backtest_source_summary(br)
+        st.caption(f"回测来源：{source_summary['label']}")
         st.write(f"最佳因子：**{best['factor_name']}**，IC 均值：{best['ic_mean']:.4f}，夏普：{best.get('sharpe_ratio', 0):.2f}，最大回撤：{best['max_drawdown']:.2%}")
         mercury = br.get("mercury_results", {})
         if mercury:

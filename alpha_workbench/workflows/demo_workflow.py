@@ -40,6 +40,7 @@ def build_research_spec(
             "rebalance_frequency": research_spec.get("rebalance_frequency", "monthly"),
             "holding_period": int(str(research_spec.get("holding_period", "20")).split()[0]),
             "transaction_cost_bps": research_spec.get("transaction_cost_bps", 10),
+            "initial_cash": research_spec.get("initial_cash", 1_000_000),
         },
     )
     return research_spec
