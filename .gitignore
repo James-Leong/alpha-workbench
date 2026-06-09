@@ -1,10 +1,13 @@
 .venv/
+.env
 __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
 .DS_Store
+uv.lock
+
+# 研究输出（本地生成文件，不提交）
 runs/*
 !runs/.gitkeep
-uv.lock

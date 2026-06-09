@@ -26,7 +26,8 @@ COPY alpha_workbench/ ./alpha_workbench/
 COPY tests/ ./tests/
 
 # 使用 uv 安装依赖到虚拟环境
-RUN uv sync --no-dev --frozen --no-cache
+# RUN uv sync --no-dev --frozen --no-cache
+RUN uv sync --no-dev --no-cache
 
 # 最终阶段：运行镜像
 FROM python:3.12-slim

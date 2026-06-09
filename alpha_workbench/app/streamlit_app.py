@@ -8,6 +8,10 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
+import plotly.graph_objects as go
+
+import time
+
 import pandas as pd
 import streamlit as st
 
@@ -1055,6 +1059,15 @@ def _render_trace(trace: dict[str, Any]) -> None:
         st.code(_json_block(trace), language="json")
 
 
+def _render_data_source(trace: dict[str, Any]) -> None:
+    """Show data source indicators: Mercury / Local / Mock."""
+    br = trace.get("backtest_result", {})
+    summary = backtest_source_summary(br)
+    chips = [f'<span class="status-chip active">{chip}</span>' for chip in summary["chips"]]
+    if chips:
+        st.markdown("".join(chips), unsafe_allow_html=True)
+
+
 def _render_empty_state() -> None:
     _html(
         """
@@ -1066,12 +1079,273 @@ def _render_empty_state() -> None:
     )
 
 
+def _render_workflow() -> None:
+    """Progressive workflow with human-in-the-loop config checkpoint.
+
+    Renders agent outputs as chat messages, pausing at Step 2 for user
+    to review and edit the research config before backtest execution.
+    """
+    wf = st.session_state
+
+    # User message (re-rendered on each phase)
+    st.chat_message("user").write(wf.wf_data["input_text"])
+
+    # === Step 1: Idea Extraction ===
+    if "idea_spec" not in wf.wf_data:
+        with st.chat_message("assistant"):
+            st.markdown("**IdeaExtractionAgent**")
+            with st.spinner("正在提取投资思想..."):
+                wf.wf_data["idea_spec"] = extract_idea(wf.wf_data["input_text"])
+            st.write(wf.wf_data["idea_spec"]["core_hypothesis"])
+            st.caption("已提炼投资假设、经济机制、所需数据和风险点。")
+        wf.wf_step = 2
+        st.rerun()
+
+    with st.chat_message("assistant"):
+        st.markdown("**IdeaExtractionAgent**")
+        st.write(wf.wf_data["idea_spec"]["core_hypothesis"])
+        st.caption("已提炼投资假设、经济机制、所需数据和风险点。")
+
+    # === Step 2: Research Config + Human-in-the-loop Checkpoint ===
+    if "research_spec" not in wf.wf_data:
+        rs_raw = build_research_spec(wf.wf_data["idea_spec"])
+        with st.chat_message("assistant"):
+            st.markdown("**ResearchSpec Builder**")
+            st.markdown("**研究配置确认（可编辑）**")
+            col_l, col_r = st.columns(2)
+            with col_l:
+                universe = st.text_input("股票池", value=rs_raw.get("universe", ""), key="wf_universe")
+                holding = st.text_input("持有期", value=str(rs_raw.get("holding_period", "")), key="wf_holding")
+                benchmark = st.text_input("基准", value=rs_raw.get("benchmark", "沪深300"), key="wf_bench")
+            with col_r:
+                rebalance = st.text_input("调仓频率", value=rs_raw.get("rebalance_frequency", ""), key="wf_rebal")
+                cost = st.number_input("交易成本 bps", value=int(rs_raw.get("transaction_cost_bps", 10)), key="wf_cost")
+                initial_cash = st.number_input(
+                    "初始资金",
+                    min_value=10000.0,
+                    value=float(rs_raw.get("initial_cash", 1000000)),
+                    step=100000.0,
+                    key="wf_initial_cash",
+                )
+                sw = rs_raw.get("sample_window", {})
+                sample_start = st.text_input("样本开始", value=sw.get("start", ""), key="wf_sample_start")
+                sample_end = st.text_input("样本结束", value=sw.get("end", ""), key="wf_sample_end")
+            st.info("请确认以上研究配置，点击下方按钮继续执行回测")
+            if st.button("确认配置，继续回测", type="primary"):
+                updated_research_spec = apply_research_config_edits(
+                    rs_raw,
+                    universe=universe,
+                    holding_period=holding,
+                    benchmark=benchmark,
+                    rebalance_frequency=rebalance,
+                    transaction_cost_bps=int(cost),
+                    sample_start=sample_start,
+                    sample_end=sample_end,
+                )
+                updated_research_spec["initial_cash"] = float(initial_cash)
+                updated_research_spec.setdefault("backtest", {})
+                updated_research_spec["backtest"]["initial_cash"] = float(initial_cash)
+                wf.wf_data["research_spec"] = updated_research_spec
+                wf.wf_step = 3
+                st.rerun()
+        return  # Pause — wait for user to click confirm
+
+    # Step 2 display (read-only after confirmed)
+    with st.chat_message("assistant"):
+        st.markdown("**ResearchSpec Builder**")
+        rs = wf.wf_data["research_spec"]
+        st.markdown("**研究配置确认**")
+        col_l, col_r = st.columns(2)
+        with col_l:
+            st.markdown(f"- **股票池：** `{rs.get('universe', '—')}`")
+            st.markdown(f"- **持有期：** `{rs.get('holding_period', '—')}`")
+            st.markdown(f"- **基准：** `{rs.get('benchmark', '沪深300')}`")
+        with col_r:
+            st.markdown(f"- **调仓频率：** `{rs.get('rebalance_frequency', '—')}`")
+            st.markdown(f"- **交易成本：** `{rs.get('transaction_cost_bps', 10)} bps`")
+            st.markdown(f"- **初始资金：** `{rs.get('initial_cash', 1000000):,.0f}`")
+            sw = rs.get("sample_window", {})
+            st.markdown(f"- **样本区间：** `{sw.get('start', '—')}` ~ `{sw.get('end', '—')}`")
+
+    # === Step 3: Factor Generation ===
+    if "factor_specs" not in wf.wf_data:
+        with st.chat_message("assistant"):
+            st.markdown("**FactorGenerationAgent**")
+            with st.spinner("正在生成候选因子..."):
+                wf.wf_data["factor_specs"] = generate_factors(wf.wf_data["idea_spec"], wf.wf_data["research_spec"])
+            factor_names = "、".join(f["factor_name"] for f in wf.wf_data["factor_specs"])
+            st.write(f"已生成候选因子：{factor_names}。")
+        wf.wf_step = 4
+        st.rerun()
+
+    with st.chat_message("assistant"):
+        st.markdown("**FactorGenerationAgent**")
+        factor_names = "、".join(f["factor_name"] for f in wf.wf_data["factor_specs"])
+        st.write(f"已生成候选因子：{factor_names}。")
+
+    # === Step 4: Backtest (Mercury first, local fallback if needed) ===
+    if "backtest_result" not in wf.wf_data:
+        with st.chat_message("assistant"):
+            st.markdown("**BacktestEngine**")
+            with st.spinner("正在执行 Mercury 回测，失败时自动切换本地 fallback..."):
+                wf.wf_data["compiled_factors"] = compile_factors(wf.wf_data["factor_specs"])
+                wf.wf_data["backtest_result"] = run_backtest(wf.wf_data["factor_specs"], wf.wf_data["research_spec"])
+            br = wf.wf_data["backtest_result"]
+            best = br["factor_results"][0]
+            source_summary = backtest_source_summary(br)
+            st.caption(f"回测来源：{source_summary['label']}")
+            st.write(f"最佳因子：**{best['factor_name']}**，IC 均值：{best['ic_mean']:.4f}，夏普：{best.get('sharpe_ratio', 0):.2f}，最大回撤：{best['max_drawdown']:.2%}")
+
+            # --- Inline Mercury result (only the best factor) ---
+            mercury = br.get("mercury_results", {})
+            if mercury:
+                fid, s = next(iter(mercury.items()))
+                st.markdown("---")
+                st.markdown(f"**交易级回测** — {fid}")
+                mcols = st.columns(5)
+                mcols[0].metric("总收益", f"{s.get('total_return', 0):.2%}")
+                mcols[1].metric("年化收益", f"{s.get('annualized_return', 0):.2%}")
+                mcols[2].metric("夏普比率", f"{s.get('sharpe', 0):.2f}")
+                mcols[3].metric("最大回撤", f"{s.get('max_drawdown', 0):.2%}")
+                mcols[4].metric("年化波动", f"{s.get('annualized_volatility', 0):.2%}")
+                mcols2 = st.columns(5)
+                mcols2[0].metric("交易天数", s.get("trading_days", "—"))
+                mcols2[1].metric("交易笔数", s.get("total_trades", "—"))
+                mcols2[2].metric("总换手率", f"{s.get('total_turnover', 0):.2f}")
+                mcols2[3].metric("日胜率", f"{s.get('win_rate', 0):.2%}")
+                mcols2[4].metric("最终净值", f"{s.get('final_unit_nav', 0):.4f}")
+        wf.wf_step = 5
+        st.rerun()
+
+    with st.chat_message("assistant"):
+        st.markdown("**BacktestEngine**")
+        br = wf.wf_data["backtest_result"]
+        best = br["factor_results"][0]
+        source_summary = backtest_source_summary(br)
+        st.caption(f"回测来源：{source_summary['label']}")
+        st.write(f"最佳因子：**{best['factor_name']}**，IC 均值：{best['ic_mean']:.4f}，夏普：{best.get('sharpe_ratio', 0):.2f}，最大回撤：{best['max_drawdown']:.2%}")
+        mercury = br.get("mercury_results", {})
+        if mercury:
+            fid, s = next(iter(mercury.items()))
+            st.markdown("---")
+            st.markdown(f"**交易级回测** — {fid}")
+            mcols = st.columns(5)
+            mcols[0].metric("总收益", f"{s.get('total_return', 0):.2%}")
+            mcols[1].metric("年化收益", f"{s.get('annualized_return', 0):.2%}")
+            mcols[2].metric("夏普比率", f"{s.get('sharpe', 0):.2f}")
+            mcols[3].metric("最大回撤", f"{s.get('max_drawdown', 0):.2%}")
+            mcols[4].metric("年化波动", f"{s.get('annualized_volatility', 0):.2%}")
+            mcols2 = st.columns(5)
+            mcols2[0].metric("交易天数", s.get("trading_days", "—"))
+            mcols2[1].metric("交易笔数", s.get("total_trades", "—"))
+            mcols2[2].metric("总换手率", f"{s.get('total_turnover', 0):.2f}")
+            mcols2[3].metric("日胜率", f"{s.get('win_rate', 0):.2%}")
+            mcols2[4].metric("最终净值", f"{s.get('final_unit_nav', 0):.4f}")
+
+    # === Step 5: LLM Explanation ===
+    if "explanation" not in wf.wf_data:
+        with st.chat_message("assistant"):
+            st.markdown("**BacktestExplanationAgent**")
+            placeholder = st.empty()
+            placeholder.info("⏳ DeepSeek API 正在生成分析报告（约需1分钟）...")
+            start = time.time()
+            wf.wf_data["explanation"] = explain_backtest(wf.wf_data["backtest_result"])
+            elapsed = time.time() - start
+            placeholder.empty()
+            if wf.wf_data["explanation"].get("is_fallback"):
+                st.caption("LLM 不可用，当前为规则生成的分析")
+            else:
+                st.caption(f"DeepSeek API 生成完成（{elapsed:.0f}秒）")
+            with st.expander("总体评价", expanded=True):
+                st.write(wf.wf_data["explanation"].get("summary", ""))
+            with st.expander("IC 分析"):
+                st.write(wf.wf_data["explanation"].get("ic_analysis", ""))
+            with st.expander("风险评估"):
+                st.write(wf.wf_data["explanation"].get("risk_assessment", ""))
+            with st.expander("改进建议"):
+                st.write(wf.wf_data["explanation"].get("recommendations", ""))
+        wf.wf_step = 6
+        st.rerun()
+
+    explanation = wf.wf_data["explanation"]
+    with st.chat_message("assistant"):
+        st.markdown("**BacktestExplanationAgent**")
+        if explanation.get("is_fallback"):
+            st.caption("LLM 不可用，当前为规则生成的分析")
+        with st.expander("总体评价", expanded=True):
+            st.write(explanation.get("summary", ""))
+        with st.expander("IC 分析"):
+            st.write(explanation.get("ic_analysis", ""))
+        with st.expander("风险评估"):
+            st.write(explanation.get("risk_assessment", ""))
+        with st.expander("改进建议"):
+            st.write(explanation.get("recommendations", ""))
+
+    # === Step 6: Audit ===
+    if "audit_report" not in wf.wf_data:
+        with st.chat_message("assistant"):
+            st.markdown("**AuditAgent**")
+            with st.spinner("正在执行审计..."):
+                partial_trace = {
+                    "input_text": wf.wf_data["input_text"],
+                    "idea_spec": wf.wf_data["idea_spec"],
+                    "research_spec": wf.wf_data["research_spec"],
+                    "factor_specs": wf.wf_data["factor_specs"],
+                    "compiled_factors": wf.wf_data["compiled_factors"],
+                    "backtest_result": wf.wf_data["backtest_result"],
+                    "explanation": wf.wf_data["explanation"],
+                }
+                wf.wf_data["audit_report"] = run_audit(partial_trace)
+            st.write(f"当前审计等级：`{wf.wf_data['audit_report']['overall_level']}`。")
+            for check in wf.wf_data["audit_report"]["checks"]:
+                st.write(f"- {check['item']}：{check['message']}")
+        wf.wf_step = 7
+        st.rerun()
+
+    audit = wf.wf_data["audit_report"]
+    with st.chat_message("assistant"):
+        st.markdown("**AuditAgent**")
+        st.write(f"当前审计等级：`{audit['overall_level']}`。")
+        for check in audit["checks"]:
+            st.write(f"- {check['item']}：{check['message']}")
+
+    # === Step 7: Report + Finalize ===
+    if "report_markdown" not in wf.wf_data:
+        with st.chat_message("assistant"):
+            st.markdown("**ReportAgent**")
+            with st.spinner("正在生成研究报告..."):
+                trace = build_research_trace(
+                    input_text=wf.wf_data["input_text"],
+                    idea_spec=wf.wf_data["idea_spec"],
+                    research_spec=wf.wf_data["research_spec"],
+                    factor_specs=wf.wf_data["factor_specs"],
+                    backtest_result=wf.wf_data["backtest_result"],
+                    explanation=wf.wf_data["explanation"],
+                    audit_report=wf.wf_data["audit_report"],
+                    report_markdown="",
+                )
+                trace["compiled_factors"] = wf.wf_data["compiled_factors"]
+                trace["report_markdown"] = generate_report(trace)
+            st.success("研究报告生成完成")
+
+        if wf.wf_data.get("save_trace"):
+            trace["trace_path"] = save_research_trace(trace)
+
+        st.session_state["trace"] = trace
+        st.session_state.wf_step = 0
+        st.session_state.wf_data = {}
+        st.rerun()
+
+
 st.set_page_config(page_title="AlphaWorkbench", page_icon="AW", layout="wide")
 st.markdown(PAGE_STYLE, unsafe_allow_html=True)
 _ensure_payload_state()
 
 if "trace" not in st.session_state:
     st.session_state["trace"] = None
+if "wf_step" not in st.session_state:
+    st.session_state.wf_step = 0
+    st.session_state.wf_data = {}
 
 with st.sidebar:
     st.markdown("## AlphaWorkbench")

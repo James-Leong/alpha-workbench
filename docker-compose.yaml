@@ -12,6 +12,8 @@ services:
       - "8501:8501"
     environment:
       - PYTHONUNBUFFERED=1
+    env_file:
+      - .env
     volumes:
       # 挂载数据目录用于持久化
       - ./alpha_workbench/data:/app/alpha_workbench/data
@@ -30,6 +32,8 @@ services:
   #   container_name: alpha-workbench-cli
   #   volumes:
   #     - ./runs:/app/runs
+  #   env_file:
+  #     - .env
   #   command: alpha-workbench-demo --save-trace
   #   networks:
   #     - alpha-workbench-net
