@@ -24,16 +24,22 @@ def _build_prompt(trace: dict[str, Any]) -> str:
 
     research_spec = trace.get("research_spec", {})
     sample_window = research_spec.get("sample_window", {})
+    rebalance_frequency = research_spec.get("rebalance_frequency", "未知")
+    holding_period = research_spec.get("holding_period", "未知")
+    transaction_cost_bps = research_spec.get("transaction_cost_bps", "未知")
 
-    return f"""你是一个量化因子审计专家。请对以下因子研究进行风险审计，重点检查三类问题：
+    return f"""你是一个量化因子审计专家。请对以下因子研究进行风险审计，重点检查四类问题：
 1. 未来函数风险：因子计算是否可能用到了未来才能知道的数据
 2. 数据proxy风险：是否用了替代数据，是否需要披露
 3. 样本稳健性：回测样本是否足够，结论是否可靠
+4. 交易频率风险：换仓频率是否过高，交易成本是否合理，是否存在触发监管限制的风险
 
 【研究基本信息】
 - 股票池：{research_spec.get("universe", "未知")}
 - 回测区间：{sample_window.get("start", "?")} 至 {sample_window.get("end", "?")}
-- 调仓频率：{research_spec.get("rebalance_frequency", "未知")}
+- 调仓频率：{rebalance_frequency}
+- 持仓周期：{holding_period}
+- 单次交易成本：{transaction_cost_bps} bps
 - 是否模拟数据：{research_spec.get("is_mock", True)}
 
 【候选因子列表】
@@ -51,6 +57,10 @@ def _build_prompt(trace: dict[str, Any]) -> str:
 
 
 def mock_run_audit(trace: dict[str, Any]) -> dict[str, Any]:
+    research_spec = trace.get("research_spec", {})
+    rebalance_frequency = research_spec.get("rebalance_frequency", "未知")
+    transaction_cost_bps = research_spec.get("transaction_cost_bps", "未知")
+
     return {
         "overall_level": "medium",
         "checks": [
@@ -69,11 +79,17 @@ def mock_run_audit(trace: dict[str, Any]) -> dict[str, Any]:
                 "level": "low",
                 "message": "当前为小样例 mock 回测，不能作为真实收益结论。",
             },
+            {
+                "item": "交易频率风险",
+                "level": "low",
+                "message": f"当前调仓频率为 {rebalance_frequency}，单次交易成本 {transaction_cost_bps} bps。月度调仓属于正常范围，但需确认高换手时段累计成本不超过预期收益。",
+            },
         ],
         "next_actions": [
             "接入真实公告日字段。",
             "替换一致预期 proxy。",
             "增加分年度和分行业稳健性检验。",
+            "评估极端行情下换手率上升对净收益的侵蚀程度。",
         ],
         "is_mock": True,
     }
@@ -98,7 +114,6 @@ def run_audit(trace: dict[str, Any]) -> dict[str, Any]:
         )
         content = response.choices[0].message.content.strip()
 
-        # 提取JSON部分
         if "```json" in content:
             content = content.split("```json")[1].split("```")[0].strip()
         elif "```" in content:
