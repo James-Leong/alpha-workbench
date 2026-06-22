@@ -1342,7 +1342,7 @@ def _render_workflow() -> None:
         st.rerun()
 
 
-st.set_page_config(page_title="AlphaWorkbench", page_icon="AW", layout="wide")
+st.set_page_config(page_title="AlphaWorkbench", page_icon="AW", layout="wide", initial_sidebar_state="expanded")
 st.markdown(PAGE_STYLE, unsafe_allow_html=True)
 _ensure_payload_state()
 
