@@ -1,8 +1,4 @@
-"""Huawei Model Call helper for role3 development.
-
-This is a copy of the helper placed under `role3/` to allow isolated
-development before migration into `alpha_workbench/`.
-"""
+"""Huawei model call helper for isolated Role3 development."""
 
 from __future__ import annotations
 
@@ -12,44 +8,44 @@ from typing import Any
 import requests
 
 
-def call_huawei_model(api_url: str, token: str, payload: dict[str, Any], timeout: int = 30) -> dict[str, Any]:
+def call_huawei_model(prompt: str, api_url: str | None = None, token: str | None = None) -> object:
+    """Call a Huawei-compatible model endpoint.
+
+    The endpoint shape may vary across deployments, so callers should treat the
+    returned object as raw model response and parse it separately.
+    """
+
+    resolved_url = api_url or os.environ.get("HUAWEI_API_URL")
+    resolved_token = token or os.environ.get("HUAWEI_TOKEN")
+    if not resolved_url:
+        raise ValueError("api_url must be provided via argument or HUAWEI_API_URL")
+    if not resolved_token:
+        raise ValueError("token must be provided via argument or HUAWEI_TOKEN")
+
     headers = {
-        "Authorization": f"Bearer {token}",
+        "Authorization": f"Bearer {resolved_token}",
         "Content-Type": "application/json",
     }
-    resp = requests.post(api_url, headers=headers, json=payload, timeout=timeout)
-    resp.raise_for_status()
-    try:
-        return resp.json()
-    except ValueError:
-        return {"text": resp.text}
-
-
-def extract_idea_via_huawei(input_text: str, api_url: str | None = None, token: str | None = None) -> dict[str, Any]:
-    api_url = api_url or os.environ.get("HUAWEI_API_URL")
-    token = token or os.environ.get("HUAWEI_TOKEN")
-    if not api_url:
-        raise ValueError("api_url must be provided via argument or HUAWEI_API_URL")
-    if not token:
-        raise ValueError("token must be provided via argument or HUAWEI_TOKEN")
-    # The Huawei MaaS / model-call APIs have varied request shapes across
-    # deployments. Try several common payload shapes until one succeeds.
-    candidate_payloads = [
-        {"input": input_text},
-        {"inputs": input_text},
-        {"instances": [input_text]},
-        {"prompt": input_text},
-        {"messages": [{"role": "user", "content": input_text}]},
+    payloads = [
+        {"messages": [{"role": "user", "content": prompt}]},
+        {"prompt": prompt},
+        {"input": prompt},
+        {"inputs": prompt},
+        {"instances": [prompt]},
     ]
 
-    last_err: Exception | None = None
-    for p in candidate_payloads:
+    last_error: Exception | None = None
+    for payload in payloads:
         try:
-            return call_huawei_model(api_url=api_url, token=token, payload=p, timeout=30)
-        except Exception as e:
-            last_err = e
-            # try next shape
-    # If all shapes failed, raise the last exception for caller to handle
-    if last_err:
-        raise last_err
-    return {"text": "no-payload-tried"}
+            response = requests.post(resolved_url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            try:
+                return response.json()
+            except ValueError:
+                return response.text
+        except Exception as exc:
+            last_error = exc
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("No Huawei request payload was attempted.")

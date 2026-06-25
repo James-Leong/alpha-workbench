@@ -1,169 +1,153 @@
-"""Role3 idea extractor — development copy.
-
-Stable interface contract:
-- input: `input_text` + optional `source_meta`
-- output: a fixed envelope with `idea_spec`, `is_mock`, `is_fallback`,
-  `source_meta`, and `raw_model_response`
-
-Only the middle processing may change later; callers should keep using the
-same input parameters and output keys.
-"""
+"""Role3 Idea Agent entrypoint."""
 
 from __future__ import annotations
 
 import json
-import os
-from importlib import import_module
+import re
 from typing import Any
 
-from alpha_workbench.parsers.text_parser import parse_input_text
-from role3.huawei_api import extract_idea_via_huawei
+from role3.fallback import mock_idea_spec
+from role3.finance_taxonomy import infer_finance_concepts
+from role3.huawei_api import call_huawei_model
+from role3.pdf_parser import maybe_parse_pdf
+from role3.prompt_templates import build_idea_extraction_prompt
+from role3.validators import validate_idea_spec
 
 
-PROMPT_TEMPLATE = '''
-请将下面的文本提炼为结构化的 IdeaSpec（JSON），严格只输出 JSON，不要多余说明。
+def _extract_text_from_raw(raw: Any) -> str | None:
+    if isinstance(raw, str):
+        return raw
+    if not isinstance(raw, dict):
+        return None
 
-要求输出字段：
-- idea_id: 使用英文短句作为 id
-- idea_name: 中文简短标题
-- core_hypothesis: 中文一句话核心假设
-- economic_mechanism: 中文列表，描述经济机制
-- required_data_concepts: 中文列表，所需数据字段或概念
-- risk_flags: 中文列表，潜在风险/未来函数说明
-- evidence: 字符串列表，重要证据片段或引用原文
-- summary: 中文简短摘要
+    for key in ("text", "content", "message", "result", "output", "data"):
+        value = raw.get(key)
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            nested = _extract_text_from_raw(value)
+            if nested:
+                return nested
 
-文本：\n"""
-{text}
-"""
+    choices = raw.get("choices")
+    if isinstance(choices, list) and choices:
+        choice = choices[0]
+        if isinstance(choice, dict):
+            message = choice.get("message")
+            if isinstance(message, dict) and isinstance(message.get("content"), str):
+                return message["content"]
+            if isinstance(choice.get("text"), str):
+                return choice["text"]
+        if isinstance(choice, str):
+            return choice
 
-请严格返回单个 JSON 对象。
-'''
+    return None
 
 
-def _build_output_envelope(
-    *,
-    idea_spec: dict[str, Any],
-    source_meta: dict[str, Any] | None,
-    is_mock: bool,
-    is_fallback: bool,
-    raw_model_response: Any,
-    missing_fields: list[str] | None = None,
+def _strip_code_fence(text: str) -> str:
+    stripped = text.strip()
+    fence_match = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", stripped, flags=re.DOTALL | re.IGNORECASE)
+    if fence_match:
+        return fence_match.group(1).strip()
+    return stripped
+
+
+def parse_model_response(raw_response: Any) -> dict[str, Any]:
+    """Parse raw model output into a dict, accepting common response shapes."""
+
+    if isinstance(raw_response, dict):
+        if isinstance(raw_response.get("idea_spec"), dict):
+            return raw_response
+        text = _extract_text_from_raw(raw_response)
+        if text:
+            return parse_model_response(text)
+        return raw_response
+
+    if isinstance(raw_response, str):
+        text = _strip_code_fence(raw_response)
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+            if not match:
+                raise
+            parsed = json.loads(match.group(0))
+        if not isinstance(parsed, dict):
+            raise TypeError(f"Model JSON must be an object, got {type(parsed)!r}")
+        return parsed
+
+    raise TypeError(f"Unsupported model response type: {type(raw_response)!r}")
+
+
+def _enrich_with_taxonomy(idea_spec: dict[str, Any], text: str) -> dict[str, Any]:
+    enriched = dict(idea_spec)
+    inferred = infer_finance_concepts(text)
+
+    required = list(enriched.get("required_data_concepts") or [])
+    for field in inferred["required_fields"]:
+        if field not in required:
+            required.append(field)
+    enriched["required_data_concepts"] = required
+
+    risks = list(enriched.get("risk_flags") or [])
+    for risk in inferred["risk_flags"]:
+        if risk not in risks:
+            risks.append(risk)
+    enriched["risk_flags"] = risks
+
+    return enriched
+
+
+def _fallback_with_error(
+    input_text: str,
+    source_meta: dict[str, Any],
+    error: Exception,
+    raw_model_response: Any = None,
 ) -> dict[str, Any]:
-    envelope: dict[str, Any] = {
-        "idea_spec": idea_spec,
-        "is_mock": is_mock,
-        "is_fallback": is_fallback,
-        "source_meta": source_meta or {"source_type": "text"},
-        "raw_model_response": raw_model_response,
-    }
-    if missing_fields:
-        envelope["missing_fields"] = missing_fields
+    envelope = mock_idea_spec(input_text, source_meta)
+    envelope["is_fallback"] = True
+    envelope["source_meta"] = {**source_meta, "fallback_error": f"{type(error).__name__}: {error}"}
+    if raw_model_response is not None:
+        envelope["raw_model_response"] = raw_model_response
     return envelope
 
 
-def mock_extract_idea(input_text: str, source_meta: dict[str, Any] | None = None) -> dict[str, Any]:
-    from alpha_workbench.schemas.specs import clone_default_idea_spec
-
-    idea_spec = clone_default_idea_spec()
-    idea_spec["user_input"] = input_text
-    idea_spec["source_meta"] = source_meta or {"source_type": "text"}
-    return _build_output_envelope(
-        idea_spec=idea_spec,
-        source_meta=source_meta,
-        is_mock=True,
-        is_fallback=True,
-        raw_model_response=None,
-    )
-
-
-def extract_idea(input_text: str, source_meta: dict[str, Any] | None = None, *, api_url: str | None = None, token: str | None = None) -> dict[str, Any]:
-    """Try calling remote Huawei LLM, fallback to mock on failure.
-
-    Arguments `api_url` and `token` override environment variables.
-    """
-    # If input_text is a path to a PDF file, try to extract text (optional)
-    text = input_text
-    if isinstance(input_text, str) and os.path.exists(input_text) and input_text.lower().endswith(".pdf"):
-        try:
-            pdf_module = import_module("PyPDF2")
-            reader = pdf_module.PdfReader(input_text)
-            pages = [p.extract_text() or "" for p in reader.pages]
-            text = "\n\n".join(pages)
-        except Exception:
-            # fallback: use the file path as a hint; caller may provide extracted text
-            text = input_text
-
-    source_meta = source_meta or {"source_type": "text"}
-    parsed = parse_input_text(text)
-    prompt = PROMPT_TEMPLATE.format(text=parsed["text"]) if parsed.get("text") else PROMPT_TEMPLATE.format(text=text)
+def extract_idea(
+    input_text: str,
+    source_meta: dict[str, Any] | None = None,
+    *,
+    api_url: str | None = None,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """Extract a stable IdeaSpec envelope from text or a PDF path."""
 
     try:
-        resp = extract_idea_via_huawei(input_text=prompt, api_url=api_url, token=token)
-        # The model may return structured JSON or a text field; try to coerce.
-        if isinstance(resp, dict):
-            # If response contains 'idea_spec' directly, return it.
-            if "idea_spec" in resp and isinstance(resp["idea_spec"], dict):
-                return _build_output_envelope(
-                    idea_spec=resp["idea_spec"],
-                    source_meta=source_meta,
-                    is_mock=False,
-                    is_fallback=False,
-                    raw_model_response=resp,
-                    missing_fields=resp.get("missing_fields") if isinstance(resp.get("missing_fields"), list) else None,
-                )
-            # If response appears to be parsed JSON already
-            for k in ("data", "result", "output", "outputs"):
-                if k in resp and isinstance(resp[k], dict):
-                    return _build_output_envelope(
-                        idea_spec=resp[k],
-                        source_meta=source_meta,
-                        is_mock=False,
-                        is_fallback=False,
-                        raw_model_response=resp,
-                    )
-            # If the response is dict but contains text, try to parse it
-            candidate_text = None
-            if "text" in resp and isinstance(resp["text"], str):
-                candidate_text = resp["text"]
-            elif "message" in resp and isinstance(resp["message"], str):
-                candidate_text = resp["message"]
-            elif "choices" in resp and isinstance(resp["choices"], list) and resp["choices"]:
-                c = resp["choices"][0]
-                if isinstance(c, dict) and "message" in c:
-                    candidate_text = c.get("message") or c.get("text")
-                else:
-                    candidate_text = str(c)
+        parsed_text, normalized_meta = maybe_parse_pdf(input_text, source_meta)
+    except Exception as exc:
+        normalized_meta = dict(source_meta or {"source_type": "text"})
+        return _fallback_with_error(input_text, normalized_meta, exc)
 
-            if candidate_text:
-                # try to parse JSON from candidate_text
-                try:
-                    idea_spec = json.loads(candidate_text)
-                    if isinstance(idea_spec, dict):
-                        return _build_output_envelope(
-                            idea_spec=idea_spec,
-                            source_meta=source_meta,
-                            is_mock=False,
-                            is_fallback=False,
-                            raw_model_response=resp,
-                        )
-                except Exception:
-                    # not JSON — wrap
-                    return _build_output_envelope(
-                        idea_spec={"model_response": candidate_text},
-                        source_meta=source_meta,
-                        is_mock=False,
-                        is_fallback=False,
-                        raw_model_response=resp,
-                    )
+    if not api_url or not token:
+        return mock_idea_spec(parsed_text, normalized_meta)
 
-        # Fallback: return raw response wrapped
-        return _build_output_envelope(
-            idea_spec={"model_response": resp},
-            source_meta=source_meta,
-            is_mock=False,
-            is_fallback=False,
-            raw_model_response=resp,
-        )
-    except Exception:
-        return mock_extract_idea(input_text, source_meta)
+    raw_response: Any = None
+    try:
+        prompt = build_idea_extraction_prompt(parsed_text, normalized_meta)
+        raw_response = call_huawei_model(prompt=prompt, api_url=api_url, token=token)
+        parsed_response = parse_model_response(raw_response)
+        candidate = parsed_response.get("idea_spec", parsed_response)
+        if not isinstance(candidate, dict):
+            raise TypeError("Parsed model response does not contain a dict idea_spec.")
+
+        idea_spec = _enrich_with_taxonomy(candidate, parsed_text)
+        idea_spec, missing_fields = validate_idea_spec(idea_spec)
+        return {
+            "idea_spec": idea_spec,
+            "is_mock": False,
+            "is_fallback": False,
+            "source_meta": normalized_meta,
+            "raw_model_response": raw_response,
+            "missing_fields": missing_fields,
+        }
+    except Exception as exc:
+        return _fallback_with_error(parsed_text, normalized_meta, exc, raw_response)
