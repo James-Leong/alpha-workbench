@@ -1,0 +1,102 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "启动 AlphaWorkbench Streamlit",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "streamlit",
+            "args": [
+                "run",
+                "alpha_workbench/app/streamlit_app.py",
+                "--server.address",
+                "127.0.0.1",
+                "--server.port",
+                "8501",
+                "--server.headless",
+                "true"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "envFile": "${workspaceFolder}/.env"
+        },
+        {
+            "name": "启动 AlphaWorkbench FastAPI",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "uvicorn",
+            "args": [
+                "alpha_workbench.api.main:app",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8000",
+                "--reload"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "envFile": "${workspaceFolder}/.env",
+            "justMyCode": false
+        },
+        {
+            "name": "启动 AlphaWorkbench 前端",
+            "type": "node-terminal",
+            "request": "launch",
+            "command": "npm run dev",
+            "cwd": "${workspaceFolder}/frontend"
+        },
+        {
+            "name": "构建 AlphaWorkbench 前端",
+            "type": "node-terminal",
+            "request": "launch",
+            "command": "npm run build",
+            "cwd": "${workspaceFolder}/frontend"
+        },
+        {
+            "name": "运行 AlphaWorkbench Demo (CLI)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "alpha_workbench",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "envFile": "${workspaceFolder}/.env"
+        },
+        {
+            "name": "运行 pytest",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "tests/",
+                "-v"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "envFile": "${workspaceFolder}/.env"
+        },
+        {
+            "name": "运行 Web API 测试",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "tests/test_api_auth.py",
+                "tests/test_api_research.py",
+                "-v"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "envFile": "${workspaceFolder}/.env"
+        }
+    ],
+    "compounds": [
+        {
+            "name": "启动产品网站 (FastAPI + 前端)",
+            "configurations": [
+                "启动 AlphaWorkbench FastAPI",
+                "启动 AlphaWorkbench 前端"
+            ],
+            "stopAll": true
+        }
+    ]
+}
