@@ -2,6 +2,7 @@ import type {
   ResearchProjectDetail,
   ResearchProjectSummary,
   ResearchRunProgress,
+  ResearchSpecUpdate,
   User
 } from "../types";
 
@@ -80,6 +81,16 @@ export const api = {
   },
   async getProject(id: string): Promise<ResearchProjectDetail> {
     return apiRequest<ResearchProjectDetail>(`/api/research/projects/${id}`);
+  },
+  async updateResearchSpec(
+    id: string,
+    researchSpec: Partial<ResearchSpecUpdate>
+  ): Promise<ResearchProjectDetail> {
+    return apiRequest<ResearchProjectDetail>(`/api/research/projects/${id}/research-spec`, {
+      method: "PATCH",
+      csrf: true,
+      body: researchSpec,
+    });
   },
   async getProjectProgress(id: string): Promise<ResearchRunProgress> {
     return apiRequest<ResearchRunProgress>(`/api/research/projects/${id}/progress`);

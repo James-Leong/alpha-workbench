@@ -18,9 +18,50 @@ from alpha_workbench.api.schemas import (
     ResearchProjectDetail,
     ResearchRunProgress,
     ResearchProjectSummary,
+    ResearchSpecUpdate,
 )
 from alpha_workbench.memory.research_trace import _safe_json_default
 from alpha_workbench.workflows.demo_workflow import run_demo_workflow
+
+
+def _update_research_spec(trace: dict[str, Any], update: ResearchSpecUpdate) -> dict[str, Any]:
+    """Merge user edits into the research_spec portion of a trace."""
+    research = dict(trace.get("research_spec") or {})
+    if update.universe is not None:
+        research["universe"] = update.universe
+    if update.rebalance_frequency is not None:
+        research["rebalance_frequency"] = update.rebalance_frequency.strip().lower()
+    if update.holding_period is not None:
+        research["holding_period"] = update.holding_period
+    if update.transaction_cost_bps is not None:
+        research["transaction_cost_bps"] = update.transaction_cost_bps
+    if update.benchmark is not None:
+        research["benchmark"] = update.benchmark
+    if update.initial_cash is not None:
+        research["initial_cash"] = update.initial_cash
+    if update.sample_window_start is not None or update.sample_window_end is not None:
+        sample_window = dict(research.get("sample_window") or {})
+        if update.sample_window_start is not None:
+            sample_window["start"] = update.sample_window_start
+        if update.sample_window_end is not None:
+            sample_window["end"] = update.sample_window_end
+        research["sample_window"] = sample_window
+    if update.filters is not None:
+        research["filters"] = update.filters
+
+    # Sync backtest sub-config with top-level values
+    backtest = dict(research.get("backtest") or {})
+    if "rebalance_frequency" in research:
+        backtest["rebalance_frequency"] = research["rebalance_frequency"]
+    if "transaction_cost_bps" in research:
+        backtest["transaction_cost_bps"] = research["transaction_cost_bps"]
+    if "initial_cash" in research:
+        backtest["initial_cash"] = research["initial_cash"]
+    research["backtest"] = backtest
+
+    trace = dict(trace)
+    trace["research_spec"] = research
+    return trace
 
 
 router = APIRouter(prefix="/api/research", tags=["research"])
@@ -271,3 +312,47 @@ def get_project(
         metrics_summary=trace_record.metrics_summary if trace_record else {},
         trace=trace_record.trace_json if trace_record else {},
     )
+
+
+@router.patch(
+    "/projects/{project_id}/research-spec",
+    response_model=ResearchProjectDetail,
+    dependencies=[Depends(verify_csrf)],
+)
+def update_research_spec(
+    project_id: int,
+    update: ResearchSpecUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ResearchProjectDetail:
+    """Update the research_spec stored on the latest run trace.
+
+    Only allowed while the workflow is still running or has just been created.
+    """
+    project = db.get(ResearchProject, project_id)
+    if project is None or project.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Research project not found")
+
+    if project.status not in {"running", "pending"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="研究已开始执行或已完成，配置不可修改。",
+        )
+
+    latest = _latest_run(db, project.id or 0, user.id or 0)
+    if latest is None:
+        raise HTTPException(status_code=404, detail="没有找到研究运行记录")
+
+    trace_record = db.exec(select(ResearchTrace).where(ResearchTrace.run_id == latest.id)).first()
+    if trace_record is None:
+        raise HTTPException(status_code=404, detail="没有找到研究路径记录")
+
+    updated_trace = _update_research_spec(trace_record.trace_json, update)
+    trace_record.trace_json = _json_safe(updated_trace)
+    project.updated_at = utcnow()
+    db.add(trace_record)
+    db.add(project)
+    db.commit()
+    db.refresh(trace_record)
+
+    return get_project(project_id, user, db)

@@ -59,6 +59,7 @@ def _run_python_demo_workflow(
     *,
     save_trace: bool = False,
     agno_run_error: str | None = None,
+    progress_callback: Any | None = None,
 ) -> dict[str, Any]:
     idea_spec = extract_idea(input_text)
     if progress_callback:
@@ -216,13 +217,18 @@ def create_agno_demo_workflow() -> Any | None:
     )
 
 
-def run_demo_workflow(input_text: str = DEFAULT_INPUT, *, save_trace: bool = False) -> dict[str, Any]:
+def run_demo_workflow(
+    input_text: str = DEFAULT_INPUT,
+    *,
+    save_trace: bool = False,
+    progress_callback: Any | None = None,
+) -> dict[str, Any]:
     if not AGNO_AVAILABLE:
-        return _run_python_demo_workflow(input_text, save_trace=save_trace)
+        return _run_python_demo_workflow(input_text, save_trace=save_trace, progress_callback=progress_callback)
 
     workflow = create_agno_demo_workflow()
     if workflow is None:
-        return _run_python_demo_workflow(input_text, save_trace=save_trace)
+        return _run_python_demo_workflow(input_text, save_trace=save_trace, progress_callback=progress_callback)
 
     try:
         response = workflow.run(input={"input_text": input_text, "save_trace": save_trace})
@@ -237,4 +243,5 @@ def run_demo_workflow(input_text: str = DEFAULT_INPUT, *, save_trace: bool = Fal
             input_text,
             save_trace=save_trace,
             agno_run_error=str(exc),
+            progress_callback=progress_callback,
         )

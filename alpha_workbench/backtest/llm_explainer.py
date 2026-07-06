@@ -14,23 +14,23 @@ Backtest Explainer for AlphaWorkbench Role 5
 import logging
 import os
 import re
-import threading
 import warnings
-from typing import Optional, Dict, Any
+from typing import Optional
 from datetime import datetime
-from pydantic import BaseModel
+
+from agno.agent import Agent
+
+from alpha_workbench.agents.core.model import AlphaModel
+from alpha_workbench.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 # 抑制 urllib3 的 SSL 警告（华为云官方示例使用 verify=False）
 warnings.filterwarnings('ignore', message='Unverified HTTPS request')
 
-from alpha_workbench.schemas.backtest_schemas import (
+from alpha_workbench.schemas.backtest_schemas import (  # noqa: E402
     BacktestMetrics,
     FactorSpec,
-    ICMetrics,
-    LayerMetrics,
-    LongShortMetrics,
     BacktestExplanationResult
 )
 
@@ -156,8 +156,6 @@ class BacktestExplainer:
         使用 requests 库直接调用，符合华为云 MaaS API 范式
         """
         try:
-            import requests
-
             # 确保 base_url 是完整的 endpoint 路径
             base_url = self.base_url
             # 修复: 正确处理已包含 /chat/completions 的 URL
@@ -180,9 +178,6 @@ class BacktestExplainer:
 
             logger.info("DeepSeek Agent 初始化成功 (模型: %s)", self.model)
             logger.debug("  API地址: %s", self.api_url)
-        except ImportError:
-            logger.warning("未安装 requests 库，将使用mock模式")
-            logger.info("请运行: pip install requests")
         except Exception as e:
             logger.warning("初始化 DeepSeek Agent 失败: %s", e)
             logger.info("将使用mock模式")
@@ -472,17 +467,29 @@ class BacktestExplainer:
         )
 
         try:
-            # 使用 OpenAI 客户端直接调用
+            # 优先使用项目统一的 AlphaModel（Agno Agent）
             import time
             logger.info("正在调用 DeepSeek API 生成分析...")
-            logger.info("  模型: %s", self.model_id)
+            logger.info("  模型: %s", settings.llm_model_id)
             logger.info("  超时: 120秒 (含2次重试)")
             logger.info("  流式响应: 已开启")
             logger.info("  Prompt大小: %d 字符", len(user_prompt))
             start_time = time.time()
 
-            # 使用流式响应的 API 调用（timeout=120秒，2次重试）
-            raw_explanation = self._call_api_with_timeout(user_prompt, timeout=120, max_retries=2, stream=True)
+            if settings.llm_api_key:
+                try:
+                    agent = Agent(
+                        model=AlphaModel(),
+                        instructions="你是一位专业的量化因子研究员，擅长分析因子回测结果。",
+                    )
+                    response = agent.run(user_prompt)
+                    raw_explanation = response.content if hasattr(response, "content") else str(response)
+                except Exception as alpha_err:
+                    logger.warning("AlphaModel 调用失败，回退到兼容模式: %s", alpha_err)
+                    raw_explanation = self._call_api_with_timeout(user_prompt, timeout=120, max_retries=2, stream=True)
+            else:
+                logger.info("未配置 LLM_API_KEY，使用 mock 模式生成解释")
+                return self._explain_mock(metrics, factor_spec, backtest_period)
 
             if raw_explanation is None:
                 logger.warning("API 调用超时，将使用 mock 模式生成解释...")

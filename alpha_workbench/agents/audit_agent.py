@@ -2,13 +2,29 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
-from dotenv import load_dotenv
-from openai import OpenAI
+from agno.agent import Agent
+from pydantic import BaseModel, Field
 
-load_dotenv()
+from alpha_workbench.agents.core.model import AlphaModel
+from alpha_workbench.core.config import settings
+
+
+class AuditCheck(BaseModel):
+    """单项审计发现。"""
+
+    item: str = Field(..., description="问题名称，如未来函数、数据 proxy、样本稳健性")
+    level: str = Field(..., description="风险等级：high / medium / low")
+    message: str = Field(..., description="具体说明")
+
+
+class AuditResult(BaseModel):
+    """审计结果结构化输出。"""
+
+    overall_level: str = Field(..., description="整体风险等级：high / medium / low")
+    checks: list[AuditCheck] = Field(..., description="审计发现列表")
+    next_actions: list[str] = Field(..., description="建议行动")
 
 
 def _build_prompt(trace: dict[str, Any]) -> str:
@@ -80,35 +96,28 @@ def mock_run_audit(trace: dict[str, Any]) -> dict[str, Any]:
 
 
 def run_audit(trace: dict[str, Any]) -> dict[str, Any]:
-    api_key = os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("OPENAI_BASE_URL", "https://api.modelarts-maas.com/v2")
-    model = os.getenv("MODEL_NAME", "deepseek-v3.2")
-
-    if not api_key or api_key.strip() == "这里填你的完整token":
+    """Run audit using AlphaModel when API key is available, otherwise mock."""
+    if not settings.llm_api_key:
         return mock_run_audit(trace)
 
     try:
-        client = OpenAI(api_key=api_key, base_url=base_url)
-        prompt = _build_prompt(trace)
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=800,
+        agent = Agent(
+            model=AlphaModel(),
+            output_schema=AuditResult,
+            instructions="你是一位专业的量化因子审计专家。请严格按要求的 JSON 结构输出审计结果。",
         )
-        content = response.choices[0].message.content.strip()
-
-        # 提取JSON部分
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0].strip()
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0].strip()
-
-        import json
-        result = json.loads(content)
-        result["is_mock"] = False
-        return result
-
+        prompt = _build_prompt(trace)
+        response = agent.run(prompt)
+        result = response.content if hasattr(response, "content") else response
+        if isinstance(result, AuditResult):
+            data = result.model_dump()
+        elif isinstance(result, dict):
+            data = result
+        else:
+            return mock_run_audit(trace)
+        data["is_mock"] = False
+        data["is_fallback"] = False
+        return data
     except Exception as e:
         print(f"[AuditAgent] LLM调用失败，使用mock fallback: {e}")
         return mock_run_audit(trace)

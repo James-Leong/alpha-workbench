@@ -31,6 +31,18 @@ export type ProgressEvent = {
   time?: string;
 };
 
+export type ResearchSpecUpdate = {
+  universe?: string;
+  rebalance_frequency?: string;
+  holding_period?: string;
+  transaction_cost_bps?: number;
+  benchmark?: string;
+  initial_cash?: number;
+  sample_window_start?: string;
+  sample_window_end?: string;
+  filters?: string[];
+};
+
 export type ResearchRunProgress = {
   project_id: number;
   run_id?: number | null;

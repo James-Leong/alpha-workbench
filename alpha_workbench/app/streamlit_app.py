@@ -8,8 +8,6 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-import plotly.graph_objects as go
-
 import time
 
 import pandas as pd
@@ -19,8 +17,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from alpha_workbench.workflows.demo_workflow import DEFAULT_INPUT, run_demo_workflow
-from alpha_workbench.workflows.integration_workflow import (
+from alpha_workbench.agents.audit_agent import run_audit  # noqa: E402
+from alpha_workbench.agents.backtest_explainer import explain_backtest  # noqa: E402
+from alpha_workbench.agents.factor_generator import generate_factors  # noqa: E402
+from alpha_workbench.agents.idea_extractor import extract_idea  # noqa: E402
+from alpha_workbench.agents.report_agent import generate_report  # noqa: E402
+from alpha_workbench.app.research_config import apply_research_config_edits  # noqa: E402
+from alpha_workbench.app.status import backtest_source_summary  # noqa: E402
+from alpha_workbench.backtest.engine import run_backtest  # noqa: E402
+from alpha_workbench.factor_engine.compiler import compile_factors  # noqa: E402
+from alpha_workbench.memory.research_trace import save_research_trace  # noqa: E402
+from alpha_workbench.schemas.specs import build_research_trace  # noqa: E402
+from alpha_workbench.workflows.demo_workflow import DEFAULT_INPUT, build_research_spec, run_demo_workflow  # noqa: E402
+from alpha_workbench.workflows.integration_workflow import (  # noqa: E402
     EMPTY_ROLE_OUTPUTS,
     WORKFLOW_STEPS,
     build_empty_integration_trace,
@@ -66,7 +75,7 @@ PAGE_STYLE = """
     }
     div[data-testid="stToolbar"] {
         top: 1.35rem;
-        right: max(1.25rem, calc((100vw - 1380px) / 2 + 1.25rem));
+        right: 1.25rem;
         z-index: 900;
     }
     div[data-testid="stToolbar"] button,
@@ -244,15 +253,12 @@ PAGE_STYLE = """
         overflow-wrap: anywhere;
     }
     .aw-metric-card.waiting {
-        border-color: #fed7aa;
         border-top-color: var(--aw-amber);
     }
     .aw-metric-card.payload {
-        border-color: #ddd6fe;
         border-top-color: var(--aw-purple);
     }
     .aw-metric-card.trace {
-        border-color: #a7f3d0;
         border-top-color: var(--aw-green);
     }
     .aw-metric-label {
@@ -313,7 +319,6 @@ PAGE_STYLE = """
         justify-content: space-between;
         gap: 1rem;
         margin-bottom: 0.85rem;
-        min-width: 920px;
     }
     .aw-pipeline-title {
         color: var(--aw-text);
@@ -328,13 +333,15 @@ PAGE_STYLE = """
     .aw-pipeline-rail {
         display: flex;
         align-items: stretch;
+        flex-wrap: wrap;
         gap: 0.8rem;
-        min-width: 1240px;
         padding-bottom: 0.15rem;
     }
     .aw-step-card {
         position: relative;
-        flex: 0 0 178px;
+        flex: 1 1 160px;
+        max-width: 200px;
+        min-width: 140px;
         border: 1px solid var(--aw-border);
         border-radius: 8px;
         background: #ffffff;
@@ -356,6 +363,11 @@ PAGE_STYLE = """
     }
     .aw-step-card:last-child::after {
         content: "";
+    }
+    @media (max-width: 900px) {
+        .aw-step-card::after {
+            content: "";
+        }
     }
     .aw-step-card.completed {
         border-color: #22c55e;
@@ -561,10 +573,13 @@ PAGE_STYLE = """
             grid-template-columns: 1fr;
         }
         .aw-pipeline-header {
-            min-width: 760px;
+            min-width: auto;
         }
         .aw-pipeline-rail {
-            min-width: 1100px;
+            min-width: auto;
+        }
+        .aw-step-card::after {
+            content: "";
         }
         .aw-brand-row {
             align-items: stretch;
@@ -635,6 +650,18 @@ def _json_block(value: Any) -> str:
 
 def _html(markup: str) -> None:
     st.markdown(markup.strip(), unsafe_allow_html=True)
+
+
+def _render_bullets(items: list[Any]) -> None:
+    """Render a list of items as styled bullets, recursing one level for dicts."""
+    if not items:
+        return
+    for item in items:
+        if isinstance(item, dict):
+            parts = [f"**{escape(str(k))}**: {escape(str(v))}" for k, v in item.items()]
+            _html(f'<div class="aw-bullet">{"<br>".join(parts)}</div>')
+        else:
+            _html(f'<div class="aw-bullet">{escape(str(item))}</div>')
 
 
 def _mode_label(value: str) -> str:
@@ -783,16 +810,6 @@ def _render_summary_cards(trace: dict[str, Any] | None) -> None:
     )
 
 
-def _render_status(trace: dict[str, Any] | None) -> None:
-    chips = []
-    for index, step in enumerate(_step_states(trace), start=1):
-        status = step["status"]
-        css = "status-chip completed" if status == "completed" else "status-chip waiting"
-        label = "已接入" if status == "completed" else "等待"
-        chips.append(f'<span class="{css}">{index}. {step["label"]} · {label}</span>')
-    _html("".join(chips))
-
-
 def _render_pipeline(trace: dict[str, Any] | None) -> None:
     cards = []
     for index, step in enumerate(_step_states(trace), start=1):
@@ -924,14 +941,25 @@ def _render_idea(trace: dict[str, Any]) -> None:
     st.write(idea.get("core_hypothesis") or idea.get("idea_name") or "IdeaSpec 已接入")
     if idea.get("economic_mechanism"):
         st.markdown("**经济机制**")
-        for item in idea["economic_mechanism"]:
-            _html(f'<div class="aw-bullet">{escape(str(item))}</div>')
+        _render_bullets(idea["economic_mechanism"])
+    if idea.get("required_data_concepts"):
+        st.markdown("**所需数据**")
+        tags = " ".join(f"`<span>{escape(str(c))}</span>`" for c in idea["required_data_concepts"])
+        st.markdown(tags, unsafe_allow_html=True)
     if idea.get("risk_flags"):
         st.markdown("**风险提示**")
-        for item in idea["risk_flags"]:
-            _html(
-                f'<div class="aw-risk-item">{escape(str(item))}</div>',
-            )
+        _render_bullets(idea["risk_flags"])
+    if idea.get("evidence"):
+        st.markdown("**证据片段**")
+        for ev in idea["evidence"]:
+            if isinstance(ev, dict):
+                source = escape(str(ev.get("source", "source")))
+                text = escape(str(ev.get("text", "")))
+                _html(
+                    f'<div class="aw-risk-item"><strong>[{source}]</strong> {text}</div>',
+                )
+            else:
+                _html(f'<div class="aw-risk-item">{escape(str(ev))}</div>')
     with st.expander("投资思想原始 JSON（IdeaSpec）"):
         st.code(_json_block(idea), language="json")
 
@@ -974,10 +1002,7 @@ def _render_factors(trace: dict[str, Any]) -> None:
                 st.write("、".join(f"`{field}`" for field in factor["required_fields"]))
             if factor.get("risk_notes"):
                 st.markdown("**风险提示**")
-                for note in factor["risk_notes"]:
-                    _html(
-                        f'<div class="aw-risk-item">{escape(str(note))}</div>',
-                    )
+                _render_bullets(factor["risk_notes"])
             if factor.get("formula_tree"):
                 with st.expander("表达式树"):
                     st.code(_json_block(factor["formula_tree"]), language="json")
@@ -1015,6 +1040,18 @@ def _render_backtest(trace: dict[str, Any]) -> None:
 
     st.dataframe(metrics, hide_index=True, use_container_width=True)
 
+    mercury_results = result.get("mercury_results") or {}
+    if isinstance(mercury_results, dict) and mercury_results:
+        st.markdown("**Mercury 交易级结果**")
+        mercury_tabs = st.tabs(list(mercury_results.keys()))
+        for tab, (fid, mercury) in zip(mercury_tabs, mercury_results.items()):
+            with tab:
+                st.code(_json_block(mercury), language="json")
+
+    if result.get("notes"):
+        st.markdown("**备注**")
+        _render_bullets(result["notes"])
+
 
 def _render_explanation(trace: dict[str, Any]) -> None:
     explanation = trace.get("explanation") or {}
@@ -1023,8 +1060,8 @@ def _render_explanation(trace: dict[str, Any]) -> None:
         return
     _render_section_heading("结果解释", "回测解释")
     st.write(explanation.get("summary", "Explanation 已接入"))
-    for item in explanation.get("observations", []):
-        _html(f'<div class="aw-bullet">{escape(str(item))}</div>')
+    if explanation.get("observations"):
+        _render_bullets(explanation["observations"])
     with st.expander("回测解释原始 JSON"):
         st.code(_json_block(explanation), language="json")
 
@@ -1033,12 +1070,31 @@ def _render_audit_and_report(trace: dict[str, Any]) -> None:
     audit = trace.get("audit_report") or {}
     if audit:
         _render_section_heading("审计结果", "审计结果")
-        st.write(f"审计等级：`{audit.get('overall_level', '-')}`")
+        level = str(audit.get("overall_level", "-")).lower()
+        level_color = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(level, "⚪")
+        st.write(f"审计等级：{level_color} `{audit.get('overall_level', '-')}`")
         for check in audit.get("checks", []):
-            message = f"{check.get('item', 'check')}：{check.get('message', '')}"
-            _html(
-                f'<div class="aw-risk-item">{escape(message)}</div>',
-            )
+            if isinstance(check, dict):
+                check_level = str(check.get("level", "low")).lower()
+                level_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(check_level, "⚪")
+                item = escape(str(check.get("item", "check")))
+                message = check.get("message", "")
+                message_html = ""
+                if isinstance(message, list):
+                    message_html = "<ul>" + "".join(f"<li>{escape(str(m))}</li>" for m in message) + "</ul>"
+                else:
+                    message_html = f"<p>{escape(str(message))}</p>"
+                _html(
+                    f'<div class="aw-risk-item">'
+                    f'<strong>{level_emoji} {item}</strong>{message_html}'
+                    f'</div>',
+                )
+            else:
+                _html(f'<div class="aw-risk-item">{escape(str(check))}</div>')
+        if audit.get("next_actions"):
+            st.markdown("**建议行动**")
+            for action in audit["next_actions"]:
+                st.markdown(f"- {escape(str(action))}")
         with st.expander("审计报告原始 JSON"):
             st.code(_json_block(audit), language="json")
     else:
@@ -1059,15 +1115,6 @@ def _render_trace(trace: dict[str, Any]) -> None:
         st.code(_json_block(trace), language="json")
 
 
-def _render_data_source(trace: dict[str, Any]) -> None:
-    """Show data source indicators: Mercury / Local / Mock."""
-    br = trace.get("backtest_result", {})
-    summary = backtest_source_summary(br)
-    chips = [f'<span class="status-chip active">{chip}</span>' for chip in summary["chips"]]
-    if chips:
-        st.markdown("".join(chips), unsafe_allow_html=True)
-
-
 def _render_empty_state() -> None:
     _html(
         """
@@ -1077,6 +1124,56 @@ def _render_empty_state() -> None:
         </div>
         """,
     )
+
+
+def _display_mercury_results(br: dict[str, Any]) -> None:
+    """Render all Mercury backtest results as tabs."""
+    mercury = br.get("mercury_results", {}) or {}
+    if not isinstance(mercury, dict) or not mercury:
+        return
+    st.markdown("---")
+    st.markdown("**交易级回测**")
+    tabs = st.tabs(list(mercury.keys()))
+    for tab, (fid, s) in zip(tabs, mercury.items()):
+        with tab:
+            mcols = st.columns(5)
+            mcols[0].metric("总收益", f"{s.get('total_return', 0):.2%}")
+            mcols[1].metric("年化收益", f"{s.get('annualized_return', 0):.2%}")
+            mcols[2].metric("夏普比率", f"{s.get('sharpe', 0):.2f}")
+            mcols[3].metric("最大回撤", f"{s.get('max_drawdown', 0):.2%}")
+            mcols[4].metric("年化波动", f"{s.get('annualized_volatility', 0):.2%}")
+            mcols2 = st.columns(5)
+            mcols2[0].metric("交易天数", s.get("trading_days", "—"))
+            mcols2[1].metric("交易笔数", s.get("total_trades", "—"))
+            mcols2[2].metric("总换手率", f"{s.get('total_turnover', 0):.2f}")
+            mcols2[3].metric("日胜率", f"{s.get('win_rate', 0):.2%}")
+            mcols2[4].metric("最终净值", f"{s.get('final_unit_nav', 0):.4f}")
+
+
+def _display_explanation(explanation: dict[str, Any]) -> None:
+    if explanation.get("is_fallback"):
+        st.caption("LLM 不可用，当前为规则生成的分析")
+    with st.expander("总体评价", expanded=True):
+        st.write(explanation.get("summary", ""))
+    with st.expander("IC 分析"):
+        st.write(explanation.get("ic_analysis", ""))
+    with st.expander("风险评估"):
+        st.write(explanation.get("risk_assessment", ""))
+    with st.expander("改进建议"):
+        st.write(explanation.get("recommendations", ""))
+
+
+def _display_audit(audit: dict[str, Any]) -> None:
+    level = str(audit.get("overall_level", "-")).lower()
+    level_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(level, "⚪")
+    st.write(f"当前审计等级：{level_emoji} `{audit.get('overall_level', '-')}`。")
+    for check in audit.get("checks", []):
+        if isinstance(check, dict):
+            check_level = str(check.get("level", "low")).lower()
+            emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(check_level, "⚪")
+            st.write(f"- {emoji} **{check.get('item')}**：{check.get('message')}")
+        else:
+            st.write(f"- {check}")
 
 
 def _render_workflow() -> None:
@@ -1096,8 +1193,6 @@ def _render_workflow() -> None:
             st.markdown("**IdeaExtractionAgent**")
             with st.spinner("正在提取投资思想..."):
                 wf.wf_data["idea_spec"] = extract_idea(wf.wf_data["input_text"])
-            st.write(wf.wf_data["idea_spec"]["core_hypothesis"])
-            st.caption("已提炼投资假设、经济机制、所需数据和风险点。")
         wf.wf_step = 2
         st.rerun()
 
@@ -1115,7 +1210,13 @@ def _render_workflow() -> None:
             col_l, col_r = st.columns(2)
             with col_l:
                 universe = st.text_input("股票池", value=rs_raw.get("universe", ""), key="wf_universe")
-                holding = st.text_input("持有期", value=str(rs_raw.get("holding_period", "")), key="wf_holding")
+                holding = st.number_input(
+                    "持有期（交易日）",
+                    min_value=1,
+                    value=int(rs_raw.get("holding_period", 20) or 20),
+                    step=1,
+                    key="wf_holding",
+                )
                 benchmark = st.text_input("基准", value=rs_raw.get("benchmark", "沪深300"), key="wf_bench")
             with col_r:
                 rebalance = st.text_input("调仓频率", value=rs_raw.get("rebalance_frequency", ""), key="wf_rebal")
@@ -1135,7 +1236,7 @@ def _render_workflow() -> None:
                 updated_research_spec = apply_research_config_edits(
                     rs_raw,
                     universe=universe,
-                    holding_period=holding,
+                    holding_period=int(holding),
                     benchmark=benchmark,
                     rebalance_frequency=rebalance,
                     transaction_cost_bps=int(cost),
@@ -1173,8 +1274,6 @@ def _render_workflow() -> None:
             st.markdown("**FactorGenerationAgent**")
             with st.spinner("正在生成候选因子..."):
                 wf.wf_data["factor_specs"] = generate_factors(wf.wf_data["idea_spec"], wf.wf_data["research_spec"])
-            factor_names = "、".join(f["factor_name"] for f in wf.wf_data["factor_specs"])
-            st.write(f"已生成候选因子：{factor_names}。")
         wf.wf_step = 4
         st.rerun()
 
@@ -1190,30 +1289,6 @@ def _render_workflow() -> None:
             with st.spinner("正在执行 Mercury 回测，失败时自动切换本地 fallback..."):
                 wf.wf_data["compiled_factors"] = compile_factors(wf.wf_data["factor_specs"])
                 wf.wf_data["backtest_result"] = run_backtest(wf.wf_data["factor_specs"], wf.wf_data["research_spec"])
-            br = wf.wf_data["backtest_result"]
-            best = br["factor_results"][0]
-            source_summary = backtest_source_summary(br)
-            st.caption(f"回测来源：{source_summary['label']}")
-            st.write(f"最佳因子：**{best['factor_name']}**，IC 均值：{best['ic_mean']:.4f}，夏普：{best.get('sharpe_ratio', 0):.2f}，最大回撤：{best['max_drawdown']:.2%}")
-
-            # --- Inline Mercury result (only the best factor) ---
-            mercury = br.get("mercury_results", {})
-            if mercury:
-                fid, s = next(iter(mercury.items()))
-                st.markdown("---")
-                st.markdown(f"**交易级回测** — {fid}")
-                mcols = st.columns(5)
-                mcols[0].metric("总收益", f"{s.get('total_return', 0):.2%}")
-                mcols[1].metric("年化收益", f"{s.get('annualized_return', 0):.2%}")
-                mcols[2].metric("夏普比率", f"{s.get('sharpe', 0):.2f}")
-                mcols[3].metric("最大回撤", f"{s.get('max_drawdown', 0):.2%}")
-                mcols[4].metric("年化波动", f"{s.get('annualized_volatility', 0):.2%}")
-                mcols2 = st.columns(5)
-                mcols2[0].metric("交易天数", s.get("trading_days", "—"))
-                mcols2[1].metric("交易笔数", s.get("total_trades", "—"))
-                mcols2[2].metric("总换手率", f"{s.get('total_turnover', 0):.2f}")
-                mcols2[3].metric("日胜率", f"{s.get('win_rate', 0):.2%}")
-                mcols2[4].metric("最终净值", f"{s.get('final_unit_nav', 0):.4f}")
         wf.wf_step = 5
         st.rerun()
 
@@ -1224,23 +1299,7 @@ def _render_workflow() -> None:
         source_summary = backtest_source_summary(br)
         st.caption(f"回测来源：{source_summary['label']}")
         st.write(f"最佳因子：**{best['factor_name']}**，IC 均值：{best['ic_mean']:.4f}，夏普：{best.get('sharpe_ratio', 0):.2f}，最大回撤：{best['max_drawdown']:.2%}")
-        mercury = br.get("mercury_results", {})
-        if mercury:
-            fid, s = next(iter(mercury.items()))
-            st.markdown("---")
-            st.markdown(f"**交易级回测** — {fid}")
-            mcols = st.columns(5)
-            mcols[0].metric("总收益", f"{s.get('total_return', 0):.2%}")
-            mcols[1].metric("年化收益", f"{s.get('annualized_return', 0):.2%}")
-            mcols[2].metric("夏普比率", f"{s.get('sharpe', 0):.2f}")
-            mcols[3].metric("最大回撤", f"{s.get('max_drawdown', 0):.2%}")
-            mcols[4].metric("年化波动", f"{s.get('annualized_volatility', 0):.2%}")
-            mcols2 = st.columns(5)
-            mcols2[0].metric("交易天数", s.get("trading_days", "—"))
-            mcols2[1].metric("交易笔数", s.get("total_trades", "—"))
-            mcols2[2].metric("总换手率", f"{s.get('total_turnover', 0):.2f}")
-            mcols2[3].metric("日胜率", f"{s.get('win_rate', 0):.2%}")
-            mcols2[4].metric("最终净值", f"{s.get('final_unit_nav', 0):.4f}")
+        _display_mercury_results(br)
 
     # === Step 5: LLM Explanation ===
     if "explanation" not in wf.wf_data:
@@ -1256,30 +1315,14 @@ def _render_workflow() -> None:
                 st.caption("LLM 不可用，当前为规则生成的分析")
             else:
                 st.caption(f"DeepSeek API 生成完成（{elapsed:.0f}秒）")
-            with st.expander("总体评价", expanded=True):
-                st.write(wf.wf_data["explanation"].get("summary", ""))
-            with st.expander("IC 分析"):
-                st.write(wf.wf_data["explanation"].get("ic_analysis", ""))
-            with st.expander("风险评估"):
-                st.write(wf.wf_data["explanation"].get("risk_assessment", ""))
-            with st.expander("改进建议"):
-                st.write(wf.wf_data["explanation"].get("recommendations", ""))
+            _display_explanation(wf.wf_data["explanation"])
         wf.wf_step = 6
         st.rerun()
 
     explanation = wf.wf_data["explanation"]
     with st.chat_message("assistant"):
         st.markdown("**BacktestExplanationAgent**")
-        if explanation.get("is_fallback"):
-            st.caption("LLM 不可用，当前为规则生成的分析")
-        with st.expander("总体评价", expanded=True):
-            st.write(explanation.get("summary", ""))
-        with st.expander("IC 分析"):
-            st.write(explanation.get("ic_analysis", ""))
-        with st.expander("风险评估"):
-            st.write(explanation.get("risk_assessment", ""))
-        with st.expander("改进建议"):
-            st.write(explanation.get("recommendations", ""))
+        _display_explanation(explanation)
 
     # === Step 6: Audit ===
     if "audit_report" not in wf.wf_data:
@@ -1296,18 +1339,14 @@ def _render_workflow() -> None:
                     "explanation": wf.wf_data["explanation"],
                 }
                 wf.wf_data["audit_report"] = run_audit(partial_trace)
-            st.write(f"当前审计等级：`{wf.wf_data['audit_report']['overall_level']}`。")
-            for check in wf.wf_data["audit_report"]["checks"]:
-                st.write(f"- {check['item']}：{check['message']}")
+            _display_audit(wf.wf_data["audit_report"])
         wf.wf_step = 7
         st.rerun()
 
     audit = wf.wf_data["audit_report"]
     with st.chat_message("assistant"):
         st.markdown("**AuditAgent**")
-        st.write(f"当前审计等级：`{audit['overall_level']}`。")
-        for check in audit["checks"]:
-            st.write(f"- {check['item']}：{check['message']}")
+        _display_audit(audit)
 
     # === Step 7: Report + Finalize ===
     if "report_markdown" not in wf.wf_data:
@@ -1326,12 +1365,28 @@ def _render_workflow() -> None:
                 )
                 trace["compiled_factors"] = wf.wf_data["compiled_factors"]
                 trace["report_markdown"] = generate_report(trace)
+            wf.wf_data["report_markdown"] = trace["report_markdown"]
+            wf.wf_data["trace"] = trace
+            st.session_state["trace"] = trace
             st.success("研究报告生成完成")
+        wf.wf_step = 8
+        st.rerun()
 
-        if wf.wf_data.get("save_trace"):
+    # Done state: show report in chat and allow starting a new study
+    report_markdown = wf.wf_data.get("report_markdown", "")
+    trace = wf.wf_data.get("trace")
+    with st.chat_message("assistant"):
+        st.markdown("**ReportAgent**")
+        st.success("研究报告生成完成")
+        if report_markdown:
+            st.markdown(report_markdown)
+        if trace is not None and wf.wf_data.get("save_trace"):
             trace["trace_path"] = save_research_trace(trace)
+            st.info(f"研究路径已保存：{trace['trace_path']}")
 
-        st.session_state["trace"] = trace
+    st.divider()
+    if st.button("开始新研究", type="primary"):
+        st.session_state["trace"] = None
         st.session_state.wf_step = 0
         st.session_state.wf_data = {}
         st.rerun()
@@ -1353,31 +1408,57 @@ with st.sidebar:
     input_text = st.text_area("研究输入", value=DEFAULT_INPUT, height=180)
     save_trace = st.toggle("保存研究路径记录", value=False)
 
-    if st.button("构建空白集成记录", type="primary", use_container_width=True):
-        trace = build_empty_integration_trace(input_text)
-        if save_trace:
-            trace = build_integration_trace(input_text=input_text, save_trace=True)
-        st.session_state["trace"] = trace
-        _set_payloads_from_trace(trace)
+    ui_mode = st.radio(
+        "界面模式",
+        options=["集成控制台", "交互式研究流"],
+        index=0,
+        help="集成控制台用于手动接入各角色输出；交互式研究流按步骤引导完成整个研究流程。",
+    )
+    st.session_state["ui_mode"] = ui_mode
 
-    if st.button("运行模拟全流程", use_container_width=True):
-        trace = run_demo_workflow(input_text, save_trace=save_trace)
-        st.session_state["trace"] = trace
-        _set_payloads_from_trace(trace)
+    if ui_mode == "交互式研究流":
+        if st.button("开始交互式研究流", type="primary", use_container_width=True):
+            st.session_state.wf_step = 1
+            st.session_state.wf_data = {
+                "input_text": input_text,
+                "save_trace": save_trace,
+            }
+            st.session_state["trace"] = None
+            st.rerun()
+    else:
+        if st.button("构建空白集成记录", type="primary", use_container_width=True):
+            trace = build_empty_integration_trace(input_text)
+            if save_trace:
+                st.warning("空白集成记录不会被保存到磁盘。")
+            st.session_state["trace"] = trace
+            _set_payloads_from_trace(trace)
+
+        if st.button("运行模拟全流程", use_container_width=True):
+            trace = run_demo_workflow(input_text, save_trace=save_trace)
+            st.session_state["trace"] = trace
+            _set_payloads_from_trace(trace)
 
     if st.button("重置", use_container_width=True):
         st.session_state["trace"] = None
+        st.session_state.wf_step = 0
+        st.session_state.wf_data = {}
         _set_payloads_from_trace(build_empty_integration_trace(""))
         st.rerun()
 
 trace = st.session_state["trace"]
+ui_mode = st.session_state.get("ui_mode", "集成控制台")
 
 _render_app_header(trace)
 _render_summary_cards(trace)
 _render_pipeline(trace)
 st.divider()
 
-if trace is None:
+if ui_mode == "交互式研究流" and st.session_state.get("wf_step", 0) > 0:
+    _render_workflow()
+    if st.session_state.get("trace"):
+        st.divider()
+        _render_trace(st.session_state["trace"])
+elif trace is None:
     left, right = st.columns([0.48, 0.52], gap="large")
     with left:
         _render_empty_state()

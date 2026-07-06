@@ -50,6 +50,18 @@ class ResearchProjectDetail(ResearchProjectSummary):
     trace: dict[str, Any] = Field(default_factory=dict)
 
 
+class ResearchSpecUpdate(BaseModel):
+    universe: str | None = None
+    rebalance_frequency: str | None = None
+    holding_period: str | None = None
+    transaction_cost_bps: float | None = None
+    benchmark: str | None = None
+    initial_cash: float | None = None
+    sample_window_start: str | None = None
+    sample_window_end: str | None = None
+    filters: list[str] | None = None
+
+
 class ResearchRunProgress(BaseModel):
     project_id: int
     run_id: int | None = None
