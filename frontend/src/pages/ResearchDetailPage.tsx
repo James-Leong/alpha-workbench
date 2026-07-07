@@ -437,14 +437,16 @@ function ResearchConfigView({
   research,
   status,
   onSaved,
+  onStart,
 }: {
   projectId: string;
   research: Record<string, unknown>;
   status: string;
   onSaved: (project: ResearchProjectDetail) => void;
+  onStart: (project: ResearchProjectDetail) => void;
 }) {
   const sw = asRecord(research.sample_window);
-  const editable = status === "running" || status === "pending";
+  const editable = status === "pending";
 
   const [universe, setUniverse] = useState(asString(research.universe));
   const [rebalanceFrequency, setRebalanceFrequency] = useState(asString(research.rebalance_frequency));
@@ -460,11 +462,11 @@ function ResearchConfigView({
   const [sampleEnd, setSampleEnd] = useState(asString(sw.end));
   const [filters, setFilters] = useState(() => asArray(research.filters).map(asString).join(", "));
   const [saving, setSaving] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState(false);
 
-  async function handleSubmit(event: React.FormEvent) {
-    event.preventDefault();
+  async function saveSpec(): Promise<ResearchProjectDetail | null> {
     setSaving(true);
     setError("");
     setSuccess(false);
@@ -488,10 +490,35 @@ function ResearchConfigView({
       const updated = await api.updateResearchSpec(projectId, payload);
       setSuccess(true);
       onSaved(updated);
+      return updated;
     } catch (err) {
       setError(err instanceof Error ? err.message : "保存失败");
+      return null;
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    await saveSpec();
+  }
+
+  async function handleStart() {
+    setStarting(true);
+    setError("");
+    try {
+      const saved = await saveSpec();
+      if (!saved) {
+        setStarting(false);
+        return;
+      }
+      const updated = await api.startResearchProject(projectId);
+      onStart(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "启动失败");
+    } finally {
+      setStarting(false);
     }
   }
 
@@ -503,7 +530,7 @@ function ResearchConfigView({
           <input
             value={universe}
             onChange={(event) => setUniverse(event.target.value)}
-            disabled={!editable || saving}
+            disabled={!editable || saving || starting}
           />
         </label>
         <label>
@@ -511,7 +538,7 @@ function ResearchConfigView({
           <input
             value={rebalanceFrequency}
             onChange={(event) => setRebalanceFrequency(event.target.value)}
-            disabled={!editable || saving}
+            disabled={!editable || saving || starting}
             placeholder="daily / weekly / monthly"
           />
         </label>
@@ -520,7 +547,7 @@ function ResearchConfigView({
           <input
             value={holdingPeriod}
             onChange={(event) => setHoldingPeriod(event.target.value)}
-            disabled={!editable || saving}
+            disabled={!editable || saving || starting}
             placeholder="20D"
           />
         </label>
@@ -529,7 +556,7 @@ function ResearchConfigView({
           <input
             value={benchmark}
             onChange={(event) => setBenchmark(event.target.value)}
-            disabled={!editable || saving}
+            disabled={!editable || saving || starting}
           />
         </label>
         <label>
@@ -539,7 +566,7 @@ function ResearchConfigView({
             step="0.1"
             value={transactionCostBps}
             onChange={(event) => setTransactionCostBps(Number(event.target.value))}
-            disabled={!editable || saving}
+            disabled={!editable || saving || starting}
           />
         </label>
         <label>
@@ -549,7 +576,7 @@ function ResearchConfigView({
             step="10000"
             value={initialCash}
             onChange={(event) => setInitialCash(Number(event.target.value))}
-            disabled={!editable || saving}
+            disabled={!editable || saving || starting}
           />
         </label>
         <label>
@@ -557,7 +584,7 @@ function ResearchConfigView({
           <input
             value={sampleStart}
             onChange={(event) => setSampleStart(event.target.value)}
-            disabled={!editable || saving}
+            disabled={!editable || saving || starting}
             placeholder="YYYY-MM-DD"
           />
         </label>
@@ -566,7 +593,7 @@ function ResearchConfigView({
           <input
             value={sampleEnd}
             onChange={(event) => setSampleEnd(event.target.value)}
-            disabled={!editable || saving}
+            disabled={!editable || saving || starting}
             placeholder="YYYY-MM-DD"
           />
         </label>
@@ -576,7 +603,7 @@ function ResearchConfigView({
         <input
           value={filters}
           onChange={(event) => setFilters(event.target.value)}
-          disabled={!editable || saving}
+          disabled={!editable || saving || starting}
           placeholder="remove_ST, remove_new_listed"
         />
       </label>
@@ -588,9 +615,19 @@ function ResearchConfigView({
       {success && <p className="form-success">配置已保存。</p>}
 
       {editable && (
-        <button className="primary-button" type="submit" disabled={saving}>
-          {saving ? "保存中..." : "保存配置"}
-        </button>
+        <div className="config-actions">
+          <button className="primary-button" type="submit" disabled={saving || starting}>
+            {saving ? "保存中..." : "保存配置"}
+          </button>
+          <button
+            className="primary-button"
+            type="button"
+            disabled={saving || starting}
+            onClick={handleStart}
+          >
+            {starting ? "启动中..." : "确认配置并继续"}
+          </button>
+        </div>
       )}
     </form>
   );
@@ -598,7 +635,8 @@ function ResearchConfigView({
 function buildStages(
   projectId: string,
   project: ResearchProjectDetail | null,
-  onSaved: (project: ResearchProjectDetail) => void
+  onSaved: (project: ResearchProjectDetail) => void,
+  onStart: (project: ResearchProjectDetail) => void
 ): Stage[] {
   const trace = project?.trace ?? {};
   const idea = asRecord(trace.idea_spec);
@@ -620,7 +658,13 @@ function buildStages(
       title: "2. 研究配置",
       subtitle: "确认股票池、调仓频率、交易成本和回测约束。",
       content: Object.keys(research).length ? (
-        <ResearchConfigView projectId={projectId} research={research} status={status} onSaved={onSaved} />
+        <ResearchConfigView
+          projectId={projectId}
+          research={research}
+          status={status}
+          onSaved={onSaved}
+          onStart={onStart}
+        />
       ) : (
         <KeyValueList data={research} />
       )
@@ -716,7 +760,7 @@ export function ResearchDetailPage() {
   }, [id]);
 
   const stages = useMemo(
-    () => buildStages(id, project, setProject),
+    () => buildStages(id, project, setProject, setProject),
     [id, project]
   );
 

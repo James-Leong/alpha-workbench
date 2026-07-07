@@ -16,7 +16,7 @@ print("=" * 60)
 
 # 打印配置（隐藏 key 前缀）
 key_preview = settings.llm_api_key[:8] + "..." if settings.llm_api_key else "(empty)"
-print(f"\n配置信息:")
+print("\n配置信息:")
 print(f"  provider : {settings.llm_provider}")
 print(f"  model_id : {settings.llm_model_id}")
 print(f"  base_url : {settings.llm_base_url}")

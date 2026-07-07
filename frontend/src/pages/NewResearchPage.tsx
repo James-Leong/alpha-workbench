@@ -31,7 +31,7 @@ export function NewResearchPage() {
       <section className="panel wide-panel">
         <span className="eyebrow">新建研究</span>
         <h1>描述你的投资想法</h1>
-        <p>系统会基于输入生成研究摘要、候选因子、回测结果和报告草稿。</p>
+        <p>系统会先提炼投资假设并生成研究配置，确认配置后再执行因子生成与回测。</p>
         <form className="research-form" onSubmit={submit}>
           <label>
             研究标题
@@ -47,7 +47,7 @@ export function NewResearchPage() {
           </label>
           {error && <p className="form-error">{error}</p>}
           <button className="primary-button" type="submit" disabled={running}>
-            {running ? "正在生成研究结果..." : "生成研究结果"}
+            {running ? "正在创建研究任务..." : "创建研究任务"}
           </button>
         </form>
       </section>

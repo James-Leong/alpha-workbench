@@ -54,17 +54,19 @@ def build_research_spec(
     return research_spec
 
 
-def _run_python_demo_workflow(
-    input_text: str = DEFAULT_INPUT,
+def run_resume_workflow(
+    input_text: str,
+    idea_spec: dict[str, Any],
+    research_spec: dict[str, Any],
     *,
     save_trace: bool = False,
-    agno_run_error: str | None = None,
     progress_callback: Any | None = None,
 ) -> dict[str, Any]:
-    idea_spec = extract_idea(input_text)
-    if progress_callback:
-        progress_callback("正在构建研究配置...")
-    research_spec = build_research_spec(idea_spec)
+    """Run the workflow stages after idea extraction using the provided research spec.
+
+    This is the entry point used by the API to resume a pending project after the
+    user has reviewed/edited the research configuration.
+    """
     if progress_callback:
         progress_callback("正在生成候选因子...")
     factor_specs = generate_factors(idea_spec, research_spec)
@@ -106,6 +108,27 @@ def _run_python_demo_workflow(
     if save_trace:
         trace["trace_path"] = save_research_trace(trace)
     trace.update(workflow_runtime_metadata())
+    return trace
+
+
+def _run_python_demo_workflow(
+    input_text: str = DEFAULT_INPUT,
+    *,
+    save_trace: bool = False,
+    agno_run_error: str | None = None,
+    progress_callback: Any | None = None,
+) -> dict[str, Any]:
+    idea_spec = extract_idea(input_text)
+    if progress_callback:
+        progress_callback("正在构建研究配置...")
+    research_spec = build_research_spec(idea_spec)
+    trace = run_resume_workflow(
+        input_text=input_text,
+        idea_spec=idea_spec,
+        research_spec=research_spec,
+        save_trace=save_trace,
+        progress_callback=progress_callback,
+    )
     if agno_run_error:
         trace["workflow_framework"] = "python_fallback"
         trace["agno_run_error"] = agno_run_error

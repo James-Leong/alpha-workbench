@@ -20,8 +20,9 @@ from alpha_workbench.api.schemas import (
     ResearchProjectSummary,
     ResearchSpecUpdate,
 )
+from alpha_workbench.agents.idea_extractor import extract_idea
 from alpha_workbench.memory.research_trace import _safe_json_default
-from alpha_workbench.workflows.demo_workflow import run_demo_workflow
+from alpha_workbench.workflows.demo_workflow import build_research_spec, run_resume_workflow
 
 
 def _update_research_spec(trace: dict[str, Any], update: ResearchSpecUpdate) -> dict[str, Any]:
@@ -75,8 +76,8 @@ INITIAL_PROGRESS = [
     },
     {
         "step": "智能研读",
-        "status": "running",
-        "message": "正在提炼投资假设与关键约束。",
+        "status": "completed",
+        "message": "已提炼投资假设，请确认研究配置。",
     },
 ]
 
@@ -159,11 +160,15 @@ def _finish_progress(db: Session, run: ResearchRun, status_value: str, message: 
     run.progress_events = events
 
 
-def _run_project_workflow(project_id: int, run_id: int, input_text: str, user_id: int) -> None:
+def _run_resume_workflow(project_id: int, run_id: int, user_id: int) -> None:
+    """Resume the workflow for a pending project using the trace's research_spec."""
     with Session(engine) as db:
         project = db.get(ResearchProject, project_id)
         run = db.get(ResearchRun, run_id)
-        if project is None or run is None:
+        trace_record = db.exec(
+            select(ResearchTrace).where(ResearchTrace.run_id == run_id)
+        ).first()
+        if project is None or run is None or trace_record is None:
             return
         start = time.perf_counter()
 
@@ -171,8 +176,14 @@ def _run_project_workflow(project_id: int, run_id: int, input_text: str, user_id
             _append_progress(db, run, message.replace("...", "").replace("。", ""), message)
 
         try:
-            trace = run_demo_workflow(
+            trace_json = trace_record.trace_json or {}
+            input_text = str(trace_json.get("input_text") or project.idea_text)
+            idea_spec = trace_json.get("idea_spec") or {}
+            research_spec = trace_json.get("research_spec") or {}
+            trace = run_resume_workflow(
                 input_text=input_text,
+                idea_spec=idea_spec,
+                research_spec=research_spec,
                 save_trace=False,
                 progress_callback=progress_callback,
             )
@@ -187,17 +198,12 @@ def _run_project_workflow(project_id: int, run_id: int, input_text: str, user_id
             project.status = "completed"
             project.summary = _summary_from_trace(safe_trace)
             project.updated_at = utcnow()
+            trace_record.trace_json = safe_trace
+            trace_record.report_markdown = report
+            trace_record.metrics_summary = metrics
             db.add(project)
             db.add(run)
-            db.add(
-                ResearchTrace(
-                    run_id=run.id or 0,
-                    user_id=user_id,
-                    trace_json=safe_trace,
-                    report_markdown=report,
-                    metrics_summary=metrics,
-                )
-            )
+            db.add(trace_record)
             db.commit()
         except Exception as exc:
             run.status = "failed"
@@ -236,11 +242,19 @@ def create_project(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ResearchProjectDetail:
+    idea_spec = extract_idea(payload.input_text.strip())
+    research_spec = build_research_spec(idea_spec)
+    partial_trace = {
+        "input_text": payload.input_text.strip(),
+        "idea_spec": idea_spec,
+        "research_spec": research_spec,
+    }
+
     project = ResearchProject(
         user_id=user.id or 0,
         title=payload.title.strip(),
         idea_text=payload.input_text.strip(),
-        status="running",
+        status="pending",
     )
     db.add(project)
     db.commit()
@@ -250,8 +264,8 @@ def create_project(
         project_id=project.id or 0,
         user_id=user.id or 0,
         input_text=payload.input_text,
-        status="running",
-        current_step="智能研读",
+        status="pending",
+        current_step="等待确认研究配置",
         progress_events=[
             {
                 **event,
@@ -264,11 +278,16 @@ def create_project(
     db.commit()
     db.refresh(run)
 
-    Thread(
-        target=_run_project_workflow,
-        args=(project.id or 0, run.id or 0, payload.input_text, user.id or 0),
-        daemon=True,
-    ).start()
+    db.add(
+        ResearchTrace(
+            run_id=run.id or 0,
+            user_id=user.id or 0,
+            trace_json=_json_safe(partial_trace),
+            report_markdown="",
+            metrics_summary={},
+        )
+    )
+    db.commit()
 
     return get_project(project.id or 0, user, db)
 
@@ -327,13 +346,14 @@ def update_research_spec(
 ) -> ResearchProjectDetail:
     """Update the research_spec stored on the latest run trace.
 
-    Only allowed while the workflow is still running or has just been created.
+    Only allowed while the project is still pending and before the user starts
+    the remaining workflow stages.
     """
     project = db.get(ResearchProject, project_id)
     if project is None or project.user_id != user.id:
         raise HTTPException(status_code=404, detail="Research project not found")
 
-    if project.status not in {"running", "pending"}:
+    if project.status != "pending":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="研究已开始执行或已完成，配置不可修改。",
@@ -354,5 +374,61 @@ def update_research_spec(
     db.add(project)
     db.commit()
     db.refresh(trace_record)
+
+    return get_project(project_id, user, db)
+
+
+@router.post(
+    "/projects/{project_id}/start",
+    response_model=ResearchProjectDetail,
+    dependencies=[Depends(verify_csrf)],
+)
+def start_project(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ResearchProjectDetail:
+    """Start the remaining workflow stages for a pending project."""
+    project = db.get(ResearchProject, project_id)
+    if project is None or project.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Research project not found")
+
+    if project.status != "pending":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="研究不在待开始状态，无法启动。",
+        )
+
+    latest = _latest_run(db, project.id or 0, user.id or 0)
+    if latest is None:
+        raise HTTPException(status_code=404, detail="没有找到研究运行记录")
+
+    trace_record = db.exec(select(ResearchTrace).where(ResearchTrace.run_id == latest.id)).first()
+    if trace_record is None:
+        raise HTTPException(status_code=404, detail="没有找到研究路径记录")
+
+    project.status = "running"
+    project.updated_at = utcnow()
+    latest.status = "running"
+    latest.current_step = "生成候选因子"
+    events = list(latest.progress_events or [])
+    events.append(
+        {
+            "step": "研究执行",
+            "status": "running",
+            "message": "开始生成候选因子...",
+            "time": utcnow().isoformat(timespec="seconds"),
+        }
+    )
+    latest.progress_events = events
+    db.add(project)
+    db.add(latest)
+    db.commit()
+
+    Thread(
+        target=_run_resume_workflow,
+        args=(project.id or 0, latest.id or 0, user.id or 0),
+        daemon=True,
+    ).start()
 
     return get_project(project_id, user, db)

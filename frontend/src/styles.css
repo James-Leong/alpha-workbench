@@ -1006,6 +1006,17 @@ textarea:focus {
   gap: 14px;
 }
 
+.config-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.config-actions .primary-button {
+  flex: 1 1 auto;
+  min-width: 140px;
+}
+
 .research-config-form label {
   display: grid;
   gap: 7px;

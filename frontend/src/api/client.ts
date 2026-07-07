@@ -92,6 +92,12 @@ export const api = {
       body: researchSpec,
     });
   },
+  async startResearchProject(id: string): Promise<ResearchProjectDetail> {
+    return apiRequest<ResearchProjectDetail>(`/api/research/projects/${id}/start`, {
+      method: "POST",
+      csrf: true,
+    });
+  },
   async getProjectProgress(id: string): Promise<ResearchRunProgress> {
     return apiRequest<ResearchRunProgress>(`/api/research/projects/${id}/progress`);
   },
