@@ -408,7 +408,7 @@ def run_factor_backtest(
     return backtest.run(input_data)
 
 
-def run_backtest(
+def run_batch_backtest(
     factor_specs: List[Dict[str, Any]],
     research_spec: Dict[str, Any],
     factor_data_dict: Optional[Dict[str, pd.DataFrame]] = None,

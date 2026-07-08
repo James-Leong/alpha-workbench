@@ -4,7 +4,7 @@ Expression Evaluator for AlphaWorkbench
 """
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Optional, Union, Tuple
 import warnings
 
 from alpha_workbench.schemas.backtest_schemas import ExpressionTree, NodeType, DataField
@@ -60,6 +60,10 @@ class ExpressionEvaluator:
             'cs_zscore': self._cs_zscore,
             'cs_percentile': self._cs_percentile,
             'cs_neutralize': self._cs_neutralize,
+            'industry_zscore': self._cs_zscore,
+            'zscore': self._cs_zscore,
+            'rank': self._cs_rank,
+            'winsorize': self._cs_winsorize,
         }
         
         # 合并所有函数
@@ -323,6 +327,12 @@ class ExpressionEvaluator:
         # 简化实现：只进行横截面去均值
         mean = df.mean(axis=1)
         return df.sub(mean, axis=0)
+
+    def _cs_winsorize(self, df: pd.DataFrame, limits: Tuple[float, float] = (0.05, 0.05)) -> pd.DataFrame:
+        """横截面去极值（每天独立计算，默认5%缩尾）"""
+        lower = df.quantile(limits[0], axis=1)
+        upper = df.quantile(1 - limits[1], axis=1)
+        return df.clip(lower=lower, upper=upper, axis=0)
     
     def validate_expression(self, expression: ExpressionTree) -> bool:
         """

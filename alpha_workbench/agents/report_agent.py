@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
-from dotenv import load_dotenv
-from openai import OpenAI
+from agno.agent import Agent
 
-load_dotenv()
+from alpha_workbench.agents.core.model import AlphaModel
+from alpha_workbench.core.config import settings
+from alpha_workbench.reports.report_generator import generate_report as generate_template_report
 
 
 def _get_factor_results(trace: dict[str, Any]) -> list:
@@ -30,16 +30,6 @@ def _build_report_prompt(trace: dict[str, Any]) -> str:
 
     if not factor_results:
         raise ValueError("没有找到回测结果")
-
-    best = factor_results[0]
-
-    # 兼容两种字段名
-    factor_name = best.get("factor_name", best.get("factor_id", "未知因子"))
-    ic_mean = best.get("ic_mean", best.get("ic", {}).get("ic_mean", 0))
-    long_short_return = best.get("long_short_return",
-                                  best.get("long_short", {}).get("annual_return", 0))
-    max_drawdown = best.get("max_drawdown",
-                             best.get("long_short", {}).get("max_drawdown", 0))
 
     factor_lines = "\n".join([
         f"- {f.get('factor_name', f.get('factor_id', '未知'))}："
@@ -78,60 +68,24 @@ def _build_report_prompt(trace: dict[str, Any]) -> str:
 
 
 def _mock_generate_report(trace: dict[str, Any]) -> str:
-    idea = trace["idea_spec"]
-    audit = trace["audit_report"]
-    factor_results = _get_factor_results(trace)
-
-    if factor_results:
-        best = factor_results[0]
-        factor_name = best.get("factor_name", best.get("factor_id", "未知因子"))
-        ic_mean = best.get("ic_mean", 0)
-        long_short_return = best.get("long_short_return", 0)
-        max_drawdown = best.get("max_drawdown", 0)
-        factor_line = f"{factor_name}"
-        metrics_line = (
-            f"IC 均值：{ic_mean:.3f}；"
-            f"多空年化收益：{long_short_return:.2%}；"
-            f"最大回撤：{max_drawdown:.2%}。"
-        )
-    else:
-        factor_line = "暂无因子数据"
-        metrics_line = "暂无回测数据"
-
-    return "\n".join([
-        "# AlphaWorkbench Demo 研究报告",
-        "",
-        f"## 投资思想\n{idea['core_hypothesis']}",
-        "",
-        f"## 当前最佳候选因子\n{factor_line}",
-        "",
-        f"## 样例回测结论\n{metrics_line}",
-        "",
-        f"## 审计等级\n{audit.get('overall_level', '未知')}",
-        "",
-        "## 说明\n本报告由 mock demo 生成，只用于展示研发流程，不构成投资建议。",
-    ])
+    """Mock fallback using the structured report template."""
+    return generate_template_report(trace)
 
 
 def generate_report(trace: dict[str, Any]) -> str:
-    api_key = os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("OPENAI_BASE_URL", "https://api.modelarts-maas.com/v2")
-    model = os.getenv("MODEL_NAME", "deepseek-v3.2")
-
-    if not api_key or api_key.strip() == "这里填你的完整token":
+    """Generate report using AlphaModel when API key is available, otherwise mock."""
+    if not settings.llm_api_key:
         return _mock_generate_report(trace)
 
     try:
-        client = OpenAI(api_key=api_key, base_url=base_url)
-        prompt = _build_report_prompt(trace)
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=600,
+        agent = Agent(
+            model=AlphaModel(),
+            instructions="你是一位专业的量化研究报告撰写专家。请根据提供的研究结果生成简洁专业的 Markdown 研究报告。",
         )
-        return response.choices[0].message.content.strip()
-
+        prompt = _build_report_prompt(trace)
+        response = agent.run(prompt)
+        content = response.content if hasattr(response, "content") else str(response)
+        return content.strip()
     except Exception as e:
         print(f"[ReportAgent] LLM调用失败，使用mock fallback: {e}")
         return _mock_generate_report(trace)

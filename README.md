@@ -74,6 +74,50 @@ uv run streamlit run alpha_workbench/app/streamlit_app.py
 python -m alpha_workbench
 ```
 
+## 产品级 Web 站点
+
+当前新增 FastAPI + React/Vite 产品外壳，提供账号密码注册、登录、GitHub OAuth、本地 SQLite 和研究历史记录。核心因子研报 workflow 仍复用现有 mock 链路，后续单独优化。
+
+启动后端：
+
+```bash
+uv sync --extra dev
+./scripts/start_api.sh
+```
+
+启动前端：
+
+```bash
+./scripts/start_frontend.sh
+```
+
+前端目录已提供 `frontend/.npmrc`，默认使用 `https://registry.npmmirror.com/`。
+
+默认地址：
+
+```text
+前端：http://localhost:5173
+后端：http://localhost:8000
+SQLite：data/alpha_workbench.sqlite3
+```
+
+GitHub OAuth 需要在 `.env` 中配置：
+
+```env
+APP_SECRET_KEY=change-me
+BACKEND_BASE_URL=http://localhost:8000
+FRONTEND_BASE_URL=http://localhost:5173
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+```
+
+Web 相关文档：
+
+- [Web 架构](docs/web_architecture.md)
+- [认证设计](docs/auth_design.md)
+- [产品页面规划](docs/product_pages.md)
+- [API 契约](docs/api_contract.md)
+
 ## 系统架构
 
 AlphaWorkbench 在 demo 阶段使用 Agno 作为 Agent 框架。系统应实现为确定性的研究工作流，而不是自由对话式的多 Agent 聊天。

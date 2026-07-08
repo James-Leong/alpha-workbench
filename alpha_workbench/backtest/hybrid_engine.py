@@ -17,9 +17,11 @@ from alpha_workbench.schemas.backtest_schemas import (
     ICMetrics,
     LayerMetrics,
     LongShortMetrics,
-    TopPortfolioMetrics
+    TopPortfolioMetrics,
+    TurnoverMetrics,
 )
 from alpha_workbench.backtest.plotter import BacktestPlotter
+from alpha_workbench.backtest import metrics as backtest_metrics
 from alpha_workbench.backtest.llm_explainer import BacktestExplainer
 from alpha_workbench.backtest.mercury_adapter import (
     MercuryAdapter,
@@ -262,168 +264,54 @@ class HybridBacktestEngine:
         return factor_data, returns_data
     
     def _calculate_ic_metrics(self, factor_data: pd.DataFrame, returns_data: pd.DataFrame) -> ICMetrics:
-        """计算IC指标"""
-        ic_series_pearson = []
-        ic_series_spearman = []
-        for date in factor_data.index:
-            f = factor_data.loc[date].dropna()
-            r = returns_data.loc[date].dropna()
-            
-            common_stocks = f.index.intersection(r.index)
-            if len(common_stocks) < 10:
-                continue
-            
-            f = f[common_stocks]
-            r = r[common_stocks]
-            
-            ic_pearson = f.corr(r, method='pearson')
-            if not np.isnan(ic_pearson):
-                ic_series_pearson.append(ic_pearson)
-
-            ic_spearman = f.corr(r, method='spearman')
-            if not np.isnan(ic_spearman):
-                ic_series_spearman.append(ic_spearman)
-        
-        ic_series_pearson = pd.Series(ic_series_pearson)
-        ic_series_spearman = pd.Series(ic_series_spearman)
-        if len(ic_series_pearson) == 0 or len(ic_series_spearman) == 0:
-            raise ValueError("没有有效的IC数据，请检查输入数据")
-        
-        ic_mean = ic_series_pearson.mean()
-        ic_std = ic_series_pearson.std()
-        icir = ic_mean / ic_std if ic_std > 0 else 0
-        ic_positive_ratio = (ic_series_pearson > 0).mean()
-        ic_tstat = ic_mean / (ic_std / np.sqrt(len(ic_series_pearson))) if ic_std > 0 else 0
-
-        rank_ic_mean = ic_series_spearman.mean()
-        rank_ic_std = ic_series_spearman.std()
-        rank_icir = rank_ic_mean / rank_ic_std if rank_ic_std > 0 else 0
-        rank_ic_positive_ratio = (ic_series_spearman > 0).mean()
-        rank_ic_tstat = (
-            rank_ic_mean / (rank_ic_std / np.sqrt(len(ic_series_spearman)))
-            if rank_ic_std > 0 else 0
-        )
-        
+        """计算IC指标（复用 backtest.metrics 实现）"""
+        result = backtest_metrics.calculate_ic_metrics(factor_data, returns_data)
         return ICMetrics(
-            ic_mean=ic_mean,
-            ic_std=ic_std,
-            icir=icir,
-            ic_positive_ratio=ic_positive_ratio,
-            ic_tstat=ic_tstat,
-            rank_ic_mean=rank_ic_mean,
-            rank_ic_std=rank_ic_std,
-            rank_icir=rank_icir,
-            rank_ic_positive_ratio=rank_ic_positive_ratio,
-            rank_ic_tstat=rank_ic_tstat
+            ic_mean=result.ic_mean,
+            ic_std=result.ic_std,
+            icir=result.icir,
+            ic_positive_ratio=result.ic_positive_ratio,
+            ic_tstat=result.ic_tstat,
+            rank_ic_mean=result.rank_ic_mean,
+            rank_ic_std=result.rank_ic_std,
+            rank_icir=result.rank_icir,
+            rank_ic_positive_ratio=result.rank_ic_positive_ratio,
+            rank_ic_tstat=result.rank_ic_tstat,
         )
-    
+
     def _calculate_layer_metrics(self, factor_data: pd.DataFrame, returns_data: pd.DataFrame, n_quantiles: int) -> LayerMetrics:
-        """计算分层收益"""
-        layer_returns = {}
-        
-        for date in factor_data.index[:-1]:
-            f = factor_data.loc[date].dropna()
-            r = returns_data.loc[date].dropna()
-            
-            common_stocks = f.index.intersection(r.index)
-            if len(common_stocks) < n_quantiles * 2:
-                continue
-            
-            f = f[common_stocks]
-            r = r[common_stocks]
-            
-            try:
-                labels = [f'L{i+1}' for i in range(n_quantiles)]
-                f_quantiles = pd.qcut(f, n_quantiles, labels=labels, duplicates='drop')
-                
-                for layer in labels:
-                    if layer in f_quantiles.values:
-                        layer_stocks = f_quantiles[f_quantiles == layer].index
-                        layer_ret = r[layer_stocks].mean()
-                        
-                        if date not in layer_returns:
-                            layer_returns[date] = {}
-                        layer_returns[date][layer] = layer_ret
-            except:
-                continue
-        
-        layer_returns_df = pd.DataFrame(layer_returns).T
-        
-        layer_annual_returns = {}
-        for layer in layer_returns_df.columns:
-            daily_mean = layer_returns_df[layer].mean()
-            layer_annual_returns[layer] = daily_mean * 252
-        
-        layer_cum_returns = (1 + layer_returns_df.fillna(0)).cumprod()
-        
+        """计算分层收益（复用 backtest.metrics 实现）"""
+        result = backtest_metrics.calculate_layer_returns(factor_data, returns_data, n_quantiles)
         return LayerMetrics(
-            layer_returns=layer_annual_returns,
-            layer_cum_returns=layer_cum_returns
+            layer_returns=result.layer_returns,
+            layer_cum_returns=result.layer_cum_returns,
         )
-    
+
     def _calculate_long_short_metrics(self, factor_data: pd.DataFrame, returns_data: pd.DataFrame, n_quantiles: int) -> LongShortMetrics:
-        """计算多空收益"""
-        long_short_returns = []
-        
-        for date in factor_data.index[:-1]:
-            f = factor_data.loc[date].dropna()
-            r = returns_data.loc[date].dropna()
-            
-            common_stocks = f.index.intersection(r.index)
-            if len(common_stocks) < n_quantiles * 2:
-                continue
-            
-            f = f[common_stocks]
-            r = r[common_stocks]
-            
-            try:
-                labels = [f'L{i+1}' for i in range(n_quantiles)]
-                f_quantiles = pd.qcut(f, n_quantiles, labels=labels, duplicates='drop')
-                
-                top_layer = labels[-1]
-                bottom_layer = labels[0]
-                
-                if top_layer in f_quantiles.values and bottom_layer in f_quantiles.values:
-                    top_stocks = f_quantiles[f_quantiles == top_layer].index
-                    bottom_stocks = f_quantiles[f_quantiles == bottom_layer].index
-                    
-                    long_ret = r[top_stocks].mean()
-                    short_ret = r[bottom_stocks].mean()
-                    
-                    ls_ret = long_ret - short_ret
-                    long_short_returns.append(ls_ret)
-            except:
-                continue
-        
-        long_short_returns = pd.Series(long_short_returns, index=factor_data.index[:-1][:len(long_short_returns)])
-        if len(long_short_returns) == 0:
-            raise ValueError("没有有效的多空收益数据，请检查输入数据")
-        
-        daily_mean = long_short_returns.mean()
-        daily_std = long_short_returns.std()
-        
-        annual_return = daily_mean * 252
-        annual_volatility = daily_std * np.sqrt(252)
-        sharpe_ratio = annual_return / annual_volatility if annual_volatility > 0 else 0
-        
-        cum_returns = (1 + long_short_returns.fillna(0)).cumprod()
-        running_max = cum_returns.expanding().max()
-        drawdown = (cum_returns - running_max) / running_max
-        max_drawdown = drawdown.min()
-        
-        return LongShortMetrics(
-            annual_return=annual_return,
-            annual_volatility=annual_volatility,
-            sharpe_ratio=sharpe_ratio,
-            max_drawdown=max_drawdown,
-            cum_returns=cum_returns,
-            top_portfolio=TopPortfolioMetrics(
-                annual_return=annual_return,
-                annual_volatility=annual_volatility,
-                sharpe_ratio=sharpe_ratio,
-                max_drawdown=max_drawdown,
-                cum_returns=cum_returns
+        """计算多空收益（复用 backtest.metrics 实现）"""
+        result = backtest_metrics.calculate_long_short_metrics(factor_data, returns_data, n_quantiles)
+        turnover = None
+        if result.turnover is not None:
+            turnover = TurnoverMetrics(
+                mean_turnover=result.turnover.mean_turnover,
+                max_turnover=result.turnover.max_turnover,
+                min_turnover=result.turnover.min_turnover,
+                turnover_series=result.turnover.turnover_series,
             )
+        return LongShortMetrics(
+            annual_return=result.annual_return,
+            annual_volatility=result.annual_volatility,
+            sharpe_ratio=result.sharpe_ratio,
+            max_drawdown=result.max_drawdown,
+            cum_returns=result.cum_returns,
+            turnover=turnover,
+            top_portfolio=TopPortfolioMetrics(
+                annual_return=result.annual_return,
+                annual_volatility=result.annual_volatility,
+                sharpe_ratio=result.sharpe_ratio,
+                max_drawdown=result.max_drawdown,
+                cum_returns=result.cum_returns,
+            ),
         )
     
     def _run_mercury_backtest(self, input_data: BacktestInput, factor_data: pd.DataFrame) -> Optional[MercuryBacktestResponse]:

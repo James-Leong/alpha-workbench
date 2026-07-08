@@ -25,6 +25,23 @@ from alpha_workbench.workflows.agno_runtime import (
 DEFAULT_INPUT = "单季度净利润超预期，且公告前股价没有明显上涨的公司，未来可能获得超额收益。"
 
 
+def _parse_holding_period(value: Any) -> int:
+    """Extract the leading integer from holding_period strings like '20 trading days'."""
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    text = str(value or "20")
+    # Extract leading digits (possibly with sign)
+    digits = ""
+    for char in text:
+        if char.isdigit():
+            digits += char
+        elif digits:
+            break
+    return int(digits) if digits else 20
+
+
 def build_research_spec(
     idea_spec: dict[str, Any],
     user_rules: dict[str, Any] | None = None,
@@ -38,15 +55,30 @@ def build_research_spec(
     """
     research_spec = clone_default_research_spec()
     research_spec["idea_name"] = idea_spec["idea_name"]
+
+    # Absorb role3 suggested_research_spec when available.
+    suggested = idea_spec.get("suggested_research_spec") or {}
+    if suggested.get("target_universe"):
+        research_spec["universe"] = suggested["target_universe"]
+    if suggested.get("rebalance_frequency"):
+        research_spec["rebalance_frequency"] = suggested["rebalance_frequency"]
+    if suggested.get("holding_period"):
+        research_spec["holding_period"] = suggested["holding_period"]
+    if suggested.get("neutralization"):
+        research_spec["neutralization"] = suggested["neutralization"]
+    if suggested.get("validation_checks"):
+        research_spec["validation_checks"] = suggested["validation_checks"]
+
     if user_rules:
         research_spec.update(user_rules)
+
     # Add role5-compatible backtest config block
     research_spec.setdefault(
         "backtest",
         {
             "groups": 5,
             "rebalance_frequency": research_spec.get("rebalance_frequency", "monthly"),
-            "holding_period": int(str(research_spec.get("holding_period", "20")).split()[0]),
+            "holding_period": _parse_holding_period(research_spec.get("holding_period", "20")),
             "transaction_cost_bps": research_spec.get("transaction_cost_bps", 10),
             "initial_cash": research_spec.get("initial_cash", 1_000_000),
         },
@@ -54,16 +86,19 @@ def build_research_spec(
     return research_spec
 
 
-def _run_python_demo_workflow(
-    input_text: str = DEFAULT_INPUT,
+def run_resume_workflow(
+    input_text: str,
+    idea_spec: dict[str, Any],
+    research_spec: dict[str, Any],
     *,
     save_trace: bool = False,
-    agno_run_error: str | None = None,
+    progress_callback: Any | None = None,
 ) -> dict[str, Any]:
-    idea_spec = extract_idea(input_text)
-    if progress_callback:
-        progress_callback("正在构建研究配置...")
-    research_spec = build_research_spec(idea_spec)
+    """Run the workflow stages after idea extraction using the provided research spec.
+
+    This is the entry point used by the API to resume a pending project after the
+    user has reviewed/edited the research configuration.
+    """
     if progress_callback:
         progress_callback("正在生成候选因子...")
     factor_specs = generate_factors(idea_spec, research_spec)
@@ -105,6 +140,27 @@ def _run_python_demo_workflow(
     if save_trace:
         trace["trace_path"] = save_research_trace(trace)
     trace.update(workflow_runtime_metadata())
+    return trace
+
+
+def _run_python_demo_workflow(
+    input_text: str = DEFAULT_INPUT,
+    *,
+    save_trace: bool = False,
+    agno_run_error: str | None = None,
+    progress_callback: Any | None = None,
+) -> dict[str, Any]:
+    idea_spec = extract_idea(input_text)
+    if progress_callback:
+        progress_callback("正在构建研究配置...")
+    research_spec = build_research_spec(idea_spec)
+    trace = run_resume_workflow(
+        input_text=input_text,
+        idea_spec=idea_spec,
+        research_spec=research_spec,
+        save_trace=save_trace,
+        progress_callback=progress_callback,
+    )
     if agno_run_error:
         trace["workflow_framework"] = "python_fallback"
         trace["agno_run_error"] = agno_run_error
@@ -216,13 +272,18 @@ def create_agno_demo_workflow() -> Any | None:
     )
 
 
-def run_demo_workflow(input_text: str = DEFAULT_INPUT, *, save_trace: bool = False) -> dict[str, Any]:
+def run_demo_workflow(
+    input_text: str = DEFAULT_INPUT,
+    *,
+    save_trace: bool = False,
+    progress_callback: Any | None = None,
+) -> dict[str, Any]:
     if not AGNO_AVAILABLE:
-        return _run_python_demo_workflow(input_text, save_trace=save_trace)
+        return _run_python_demo_workflow(input_text, save_trace=save_trace, progress_callback=progress_callback)
 
     workflow = create_agno_demo_workflow()
     if workflow is None:
-        return _run_python_demo_workflow(input_text, save_trace=save_trace)
+        return _run_python_demo_workflow(input_text, save_trace=save_trace, progress_callback=progress_callback)
 
     try:
         response = workflow.run(input={"input_text": input_text, "save_trace": save_trace})
@@ -237,4 +298,5 @@ def run_demo_workflow(input_text: str = DEFAULT_INPUT, *, save_trace: bool = Fal
             input_text,
             save_trace=save_trace,
             agno_run_error=str(exc),
+            progress_callback=progress_callback,
         )

@@ -51,7 +51,7 @@
 | 阶段 | 名称 | 预期行为 | 当前状态 |
 |------|------|----------|----------|
 | 1 | 输入投资想法 | 文本框可输入，点击提交无报错 | ✅ 通过 |
-| 2 | IdeaExtraction | 提炼 IdeaSpec 结构化输出 | ⚠️ 通过（固定模板，不随输入变化）|
+| 2 | IdeaExtraction | 提炼 IdeaSpec 结构化输出 | ✅ 通过（真实 LLM + taxonomy 增强 + fallback）|
 | 3 | ResearchSpec | 展示研究配置，Human可编辑 | ✅ 通过 |
 | 4 | FactorGeneration | 生成候选因子族 | ⚠️ 通过（固定3因子，不随输入变化）|
 | 5 | BacktestEngine | 回测指标+图表展示 | ⚠️ 通过（Mercury 401，走mock数据）|
@@ -60,7 +60,7 @@
 | 8 | ReportAgent | 生成完整Markdown研究报告 | ✅ 通过（真实LLM）|
 | 9 | Trace保存 | runs/ 目录生成JSON文件 | ✅ 通过 |
 
-> ⚠️ 说明：阶段2/4为当前版本的已知限制，不影响演示核心流程。
+> ⚠️ 说明：阶段4为当前版本的已知限制，不影响演示核心流程。
 > 阶段5/6有完善的fallback机制，演示稳定。
 
 ---
@@ -81,7 +81,7 @@
 
 | 问题 | 性质 | 演示影响 | 处理策略 |
 |------|------|----------|----------|
-| Role3 IdeaExtraction 返回固定模板 | 功能限制 | 不能演示"不同输入不同输出" | 演示重点放流程和审计质量 |
+| Role3 IdeaExtraction 返回固定模板 | 功能限制 | 不能演示"不同输入不同输出" | 已迁移真实 LLM + fallback，可随输入变化 |
 | Role4 FactorGeneration 返回写死因子 | 功能限制 | 同上 | 同上 |
 | Mercury 401，回测走mock数据 | 外部依赖 | 数字是模拟的 | 审计模块主动标记，变为"反证优先"亮点 |
 | BacktestExplanation 403，走mock | 外部依赖 | 解释非真实LLM | fallback机制是设计特性，稳定不崩溃 |
