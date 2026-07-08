@@ -72,12 +72,33 @@ export const api = {
   async listProjects(): Promise<ResearchProjectSummary[]> {
     return apiRequest<ResearchProjectSummary[]>("/api/research/projects");
   },
-  async createProject(title: string, inputText: string): Promise<ResearchProjectDetail> {
-    return apiRequest<ResearchProjectDetail>("/api/research/projects", {
+  async createProject(
+    title: string,
+    inputText: string,
+    file?: File
+  ): Promise<ResearchProjectDetail> {
+    const body = new FormData();
+    body.append("title", title);
+    if (file) {
+      body.append("file", file);
+      body.append("source_type", "pdf");
+    } else {
+      body.append("input_text", inputText);
+      body.append("source_type", "text");
+    }
+    const response = await fetch(`${API_BASE_URL}/api/research/projects`, {
       method: "POST",
-      csrf: true,
-      body: { title, input_text: inputText }
+      credentials: "include",
+      headers: {
+        ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {})
+      },
+      body,
     });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.detail || `请求失败：${response.status}`);
+    }
+    return response.json() as Promise<ResearchProjectDetail>;
   },
   async getProject(id: string): Promise<ResearchProjectDetail> {
     return apiRequest<ResearchProjectDetail>(`/api/research/projects/${id}`);

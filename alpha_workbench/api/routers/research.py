@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 from threading import Thread
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from pydantic import ValidationError
 from sqlmodel import Session, select
 
 from alpha_workbench.api.auth.sessions import get_current_user, verify_csrf
@@ -22,7 +24,7 @@ from alpha_workbench.api.schemas import (
 )
 from alpha_workbench.agents.idea_extractor import extract_idea
 from alpha_workbench.memory.research_trace import _safe_json_default
-from alpha_workbench.workflows.demo_workflow import build_research_spec, run_resume_workflow
+from alpha_workbench.workflows.demo_workflow import build_research_spec, run_resume_workflow, _parse_holding_period
 
 
 def _update_research_spec(trace: dict[str, Any], update: ResearchSpecUpdate) -> dict[str, Any]:
@@ -54,6 +56,8 @@ def _update_research_spec(trace: dict[str, Any], update: ResearchSpecUpdate) -> 
     backtest = dict(research.get("backtest") or {})
     if "rebalance_frequency" in research:
         backtest["rebalance_frequency"] = research["rebalance_frequency"]
+    if "holding_period" in research:
+        backtest["holding_period"] = _parse_holding_period(research["holding_period"])
     if "transaction_cost_bps" in research:
         backtest["transaction_cost_bps"] = research["transaction_cost_bps"]
     if "initial_cash" in research:
@@ -237,23 +241,91 @@ def list_projects(
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(verify_csrf)],
 )
-def create_project(
-    payload: ResearchProjectCreate,
+async def create_project(
+    request: Request,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ResearchProjectDetail:
-    idea_spec = extract_idea(payload.input_text.strip())
+    """Create a research project from text or an uploaded PDF.
+
+    Supports both JSON body (legacy) and multipart/form-data (PDF upload).
+    """
+
+    content_type = request.headers.get("content-type", "")
+    is_multipart = content_type.startswith("multipart/form-data")
+
+    if is_multipart:
+        form = await request.form()
+        title = str(form.get("title", "")).strip()
+        input_text = str(form.get("input_text", "")).strip()
+        source_type = str(form.get("source_type", "text")).strip()
+        file_field = form.get("file")
+        # starlette.formparsers may return UploadFile or a string; accept any truthy value
+        project_file: Any = file_field if file_field is not None else None
+        project_title = title
+        project_input = input_text
+        project_source_type = source_type
+    else:
+        # Legacy JSON path: read and validate the raw body ourselves.
+        try:
+            raw_body = await request.body()
+            raw = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=422, detail=f"Invalid JSON: {exc}") from exc
+
+        try:
+            payload = ResearchProjectCreate(**raw)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
+        project_title = payload.title.strip()
+        project_input = payload.input_text.strip()
+        project_source_type = payload.source_type or "text"
+        project_file = None
+
+    file_content_type = project_file.content_type if hasattr(project_file, "content_type") else None
+    filename = project_file.filename if hasattr(project_file, "filename") else str(getattr(project_file, "filename", "") or "")
+    is_pdf = (
+        project_source_type == "pdf"
+        or file_content_type in ("application/pdf",)
+        or str(filename).lower().endswith(".pdf")
+    )
+
+    tmp_path: str | None = None
+    if is_pdf and project_file is not None:
+        import tempfile
+
+        suffix = ".pdf" if str(filename).lower().endswith(".pdf") else ""
+        file_bytes = project_file.file.read() if hasattr(project_file, "file") else b""
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+        source_meta = {"source_type": "pdf", "pdf_path": tmp_path, "filename": filename}
+        idea_input = tmp_path
+        display_input = filename or "PDF 研报"
+    else:
+        source_meta = {"source_type": "text"}
+        idea_input = project_input
+        display_input = project_input
+
+    try:
+        idea_spec = extract_idea(idea_input, source_meta)
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
     research_spec = build_research_spec(idea_spec)
     partial_trace = {
-        "input_text": payload.input_text.strip(),
+        "input_text": display_input,
         "idea_spec": idea_spec,
         "research_spec": research_spec,
     }
 
     project = ResearchProject(
         user_id=user.id or 0,
-        title=payload.title.strip(),
-        idea_text=payload.input_text.strip(),
+        title=project_title,
+        idea_text=display_input,
         status="pending",
     )
     db.add(project)
@@ -263,7 +335,7 @@ def create_project(
     run = ResearchRun(
         project_id=project.id or 0,
         user_id=user.id or 0,
-        input_text=payload.input_text,
+        input_text=display_input,
         status="pending",
         current_step="等待确认研究配置",
         progress_events=[

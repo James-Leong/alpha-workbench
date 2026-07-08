@@ -240,6 +240,90 @@ textarea:focus {
   padding: 10px 12px;
 }
 
+.form-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.form-divider::before,
+.form-divider::after {
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+  content: "";
+}
+
+.input-mode-switch {
+  display: flex;
+  gap: 8px;
+}
+
+.input-mode-switch label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-soft);
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease;
+}
+
+.input-mode-switch label:hover {
+  border-color: var(--muted);
+}
+
+.input-mode-switch label.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.input-mode-switch input[type="radio"] {
+  width: auto;
+  margin: 0;
+}
+
+input[type="file"] {
+  padding: 8px 0;
+  border: none;
+  background: transparent;
+}
+
+.file-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.text-button {
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+}
+
+.text-button:hover {
+  text-decoration: underline;
+}
+
 .auth-hint {
   margin: 4px 0 0;
   color: var(--muted);

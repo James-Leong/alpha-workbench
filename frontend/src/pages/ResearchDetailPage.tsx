@@ -1,7 +1,7 @@
 import { marked } from "marked";
 import katex from "katex";
 import "katex/dist/katex.min.css";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { api } from "../api/client";
 import { statusLabel } from "../components/status";
@@ -175,6 +175,7 @@ function IdeaSpecView({ idea }: { idea: Record<string, unknown> }) {
   return (
     <div className="idea-view">
       <p className="lead">{asString(idea.core_hypothesis || idea.idea_name)}</p>
+      {Boolean(idea.summary) && <p className="idea-summary">{asString(idea.summary)}</p>}
       {Boolean(idea.economic_mechanism) && asArray(idea.economic_mechanism).length > 0 && (
         <>
           <h4>经济机制</h4>
@@ -187,6 +188,12 @@ function IdeaSpecView({ idea }: { idea: Record<string, unknown> }) {
           <TagList tags={asArray(idea.required_data_concepts)} />
         </>
       )}
+      {Boolean(idea.factor_directions) && asArray(idea.factor_directions).length > 0 && (
+        <>
+          <h4>因子方向</h4>
+          <TagList tags={asArray(idea.factor_directions)} />
+        </>
+      )}
       {Boolean(idea.risk_flags) && asArray(idea.risk_flags).length > 0 && (
         <>
           <h4>风险提示</h4>
@@ -195,6 +202,12 @@ function IdeaSpecView({ idea }: { idea: Record<string, unknown> }) {
               <li key={index}>{asString(flag)}</li>
             ))}
           </ul>
+        </>
+      )}
+      {Boolean(idea.uncertainties) && asArray(idea.uncertainties).length > 0 && (
+        <>
+          <h4>不确定性</h4>
+          <BulletList items={asArray(idea.uncertainties)} />
         </>
       )}
       {Boolean(idea.evidence) && asArray(idea.evidence).length > 0 && (
@@ -211,6 +224,12 @@ function IdeaSpecView({ idea }: { idea: Record<string, unknown> }) {
               );
             })}
           </ul>
+        </>
+      )}
+      {Boolean(idea.suggested_research_spec) && (
+        <>
+          <h4>推荐研究配置</h4>
+          <JsonBlock value={idea.suggested_research_spec} />
         </>
       )}
       <JsonBlock value={idea} />
@@ -728,33 +747,54 @@ export function ResearchDetailPage() {
   const { id = "" } = useParams();
   const [project, setProject] = useState<ResearchProjectDetail | null>(null);
   const [error, setError] = useState("");
+  const statusRef = useRef(project?.status);
 
   useEffect(() => {
+    statusRef.current = project?.status;
+  }, [project?.status]);
+
+  useEffect(() => {
+    if (!id) {
+      return;
+    }
     let disposed = false;
-    let timer: number | undefined;
+    let interval: number | undefined;
+    let loading = false;
+    let lastStatus: string | undefined;
 
     async function load() {
+      if (loading) {
+        return;
+      }
+      loading = true;
       try {
         const next = await api.getProject(id);
         if (disposed) {
           return;
         }
         setProject(next);
-        if (next.status === "running") {
-          timer = window.setTimeout(load, 1500);
-        }
+        lastStatus = next.status;
       } catch (err) {
         if (!disposed) {
           setError(err instanceof Error ? err.message : "加载失败");
         }
+      } finally {
+        loading = false;
       }
     }
+
+    // Poll while the project is running so the UI updates as the workflow progresses.
+    interval = window.setInterval(() => {
+      if (statusRef.current === "running") {
+        load();
+      }
+    }, 1500);
 
     load();
     return () => {
       disposed = true;
-      if (timer) {
-        window.clearTimeout(timer);
+      if (interval) {
+        window.clearInterval(interval);
       }
     };
   }, [id]);

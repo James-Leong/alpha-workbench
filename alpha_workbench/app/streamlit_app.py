@@ -645,7 +645,9 @@ OUTPUT_LABELS = {
 
 
 def _json_block(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, indent=2)
+    from alpha_workbench.memory.research_trace import _safe_json_default
+
+    return json.dumps(value, ensure_ascii=False, indent=2, default=_safe_json_default)
 
 
 def _html(markup: str) -> None:
@@ -939,6 +941,9 @@ def _render_idea(trace: dict[str, Any]) -> None:
 
     _render_section_heading("投资思想", "投资思想")
     st.write(idea.get("core_hypothesis") or idea.get("idea_name") or "IdeaSpec 已接入")
+    if idea.get("summary"):
+        st.markdown("**摘要**")
+        st.write(idea["summary"])
     if idea.get("economic_mechanism"):
         st.markdown("**经济机制**")
         _render_bullets(idea["economic_mechanism"])
@@ -949,6 +954,13 @@ def _render_idea(trace: dict[str, Any]) -> None:
     if idea.get("risk_flags"):
         st.markdown("**风险提示**")
         _render_bullets(idea["risk_flags"])
+    if idea.get("factor_directions"):
+        st.markdown("**因子方向**")
+        tags = " ".join(f"`<span>{escape(str(c))}</span>`" for c in idea["factor_directions"])
+        st.markdown(tags, unsafe_allow_html=True)
+    if idea.get("uncertainties"):
+        st.markdown("**不确定性**")
+        _render_bullets(idea["uncertainties"])
     if idea.get("evidence"):
         st.markdown("**证据片段**")
         for ev in idea["evidence"]:
@@ -1014,7 +1026,13 @@ def _render_compiled_factors(trace: dict[str, Any]) -> None:
         _render_empty_slot("因子编译结果", "角色 4")
         return
     _render_section_heading("校验结果", "因子编译结果")
-    st.dataframe(pd.DataFrame(compiled), hide_index=True, use_container_width=True)
+    df = pd.DataFrame(compiled)
+    for col in df.columns:
+        if df[col].apply(lambda x: isinstance(x, (dict, list))).any():
+            df[col] = df[col].apply(
+                lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, (dict, list)) else x
+            )
+    st.dataframe(df, hide_index=True, use_container_width=True)
 
 
 def _render_backtest(trace: dict[str, Any]) -> None:
@@ -1392,7 +1410,7 @@ def _render_workflow() -> None:
         st.rerun()
 
 
-st.set_page_config(page_title="AlphaWorkbench", page_icon="AW", layout="wide")
+st.set_page_config(page_title="AlphaWorkbench", page_icon="AW", layout="wide", initial_sidebar_state="expanded")
 st.markdown(PAGE_STYLE, unsafe_allow_html=True)
 _ensure_payload_state()
 
