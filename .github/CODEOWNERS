@@ -1,0 +1,6 @@
+# CODEOWNERS
+# 该文件定义了仓库中所有代码的默认所有者。
+# 更多说明请参考：https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# 默认所有者：全局匹配仓库所有文件
+* @James-Leong
