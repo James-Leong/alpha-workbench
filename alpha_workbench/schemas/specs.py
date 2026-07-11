@@ -59,7 +59,7 @@ DEFAULT_RESEARCH_SPEC: dict[str, Any] = {
         "forecast_proxy_allowed": True,
     },
     "factor_execution": {
-        "mode": "expression",
+        "mode": "codex",
         "code_agent": "codex",
         "fallback_to_expression": True,
     },

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+from threading import Event
 import time
 
 from fastapi.testclient import TestClient
@@ -80,9 +81,25 @@ def test_create_and_read_research_project(tmp_path, monkeypatch):
     project = created.json()
     assert project["status"] == "pending"
     assert project["trace"]
+    assert project["progress_events"][-1]["status"] == "running"
+    assert project["progress_events"]
+
+    for _ in range(20):
+        detail = client.get(f"/api/research/projects/{project['id']}")
+        assert detail.status_code == 200
+        project = detail.json()
+        if project["trace"].get("research_spec"):
+            break
+        time.sleep(0.05)
+
+    assert project["status"] == "pending"
     assert project["trace"]["idea_spec"] == idea_spec
     assert project["trace"]["research_spec"]
-    assert project["progress_events"]
+    assert project["trace"]["research_spec"]["factor_execution"]["mode"] == "codex"
+    assert all(
+        event["status"] != "running"
+        for event in project["progress_events"]
+    )
 
     patched = client.patch(
         f"/api/research/projects/{project['id']}/research-spec",
@@ -110,6 +127,10 @@ def test_create_and_read_research_project(tmp_path, monkeypatch):
     assert detail_payload["status"] == "completed"
     assert detail_payload["trace"]
     assert detail_payload["report_markdown"]
+    assert all(
+        event["status"] != "running"
+        for event in detail_payload["progress_events"]
+    )
 
     listing = client.get("/api/research/projects")
     assert listing.status_code == 200
@@ -118,6 +139,56 @@ def test_create_and_read_research_project(tmp_path, monkeypatch):
     progress = client.get(f"/api/research/projects/{project['id']}/progress")
     assert progress.status_code == 200
     assert progress.json()["progress_events"]
+
+
+def test_create_project_returns_before_initial_research_finishes(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    import alpha_workbench.api.routers.research as research_router
+
+    release = Event()
+
+    def blocking_extract(text, source_meta=None):
+        release.wait(timeout=2)
+        return {
+            "idea_name": "异步研读",
+            "core_hypothesis": "创建接口应先返回，智能研读在后台完成。",
+        }
+
+    monkeypatch.setattr(research_router, "extract_idea", blocking_extract)
+
+    register = client.post(
+        "/api/auth/register",
+        json={
+            "email": "async@example.com",
+            "username": "asyncuser",
+            "password": "strong-password",
+        },
+    )
+    csrf = register.json()["csrf_token"]
+
+    start = time.perf_counter()
+    created = client.post(
+        "/api/research/projects",
+        headers={"X-CSRF-Token": csrf},
+        json={"title": "异步任务", "input_text": "test input"},
+    )
+    elapsed = time.perf_counter() - start
+
+    assert created.status_code == 201
+    assert elapsed < 1.0
+    payload = created.json()
+    assert payload["status"] == "pending"
+    assert payload["current_step"] == "智能研读"
+    assert payload["trace"] == {"input_text": "test input"}
+
+    release.set()
+    for _ in range(20):
+        detail = client.get(f"/api/research/projects/{payload['id']}")
+        if detail.json()["trace"].get("research_spec"):
+            break
+        time.sleep(0.05)
+
+    assert detail.json()["trace"]["idea_spec"]["idea_name"] == "异步研读"
 
 
 def test_update_spec_rejected_after_start(tmp_path, monkeypatch):
@@ -154,6 +225,11 @@ def test_update_spec_rejected_after_start(tmp_path, monkeypatch):
         json={"title": "test", "input_text": "test input"},
     )
     project_id = created.json()["id"]
+    for _ in range(20):
+        detail = client.get(f"/api/research/projects/{project_id}")
+        if detail.json()["trace"].get("research_spec"):
+            break
+        time.sleep(0.05)
 
     client.post(
         f"/api/research/projects/{project_id}/start",
@@ -202,6 +278,11 @@ def test_start_requires_pending(tmp_path, monkeypatch):
         json={"title": "test", "input_text": "test input"},
     )
     project_id = created.json()["id"]
+    for _ in range(20):
+        detail = client.get(f"/api/research/projects/{project_id}")
+        if detail.json()["trace"].get("research_spec"):
+            break
+        time.sleep(0.05)
 
     # First start succeeds
     first = client.post(

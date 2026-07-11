@@ -1,6 +1,7 @@
 import { marked } from "marked";
 import katex from "katex";
 import "katex/dist/katex.min.css";
+import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { api } from "../api/client";
@@ -10,6 +11,7 @@ import type { ProgressEvent, ResearchProjectDetail, ResearchSpecUpdate } from ".
 type Stage = {
   title: string;
   subtitle: string;
+  status?: string;
   content: React.ReactNode;
 };
 
@@ -168,6 +170,19 @@ function JsonBlock({ value }: { value: unknown }) {
       <summary>原始数据</summary>
       <pre className="json-box">{textValue(value)}</pre>
     </details>
+  );
+}
+
+function CodeBlock({ code }: { code: string }) {
+  return <pre className="code-box"><code>{code}</code></pre>;
+}
+
+function EmptyBlock({ title, detail }: { title: string; detail: string }) {
+  return (
+    <div className="empty-block">
+      <strong>{title}</strong>
+      <p>{detail}</p>
+    </div>
   );
 }
 
@@ -499,6 +514,7 @@ function ResearchConfigView({
       initial_cash: Number(initialCash),
       sample_window_start: sampleStart.trim(),
       sample_window_end: sampleEnd.trim(),
+      factor_execution_mode: "codex",
       filters: filters
         .split(",")
         .map((s) => s.trim())
@@ -626,6 +642,10 @@ function ResearchConfigView({
           placeholder="remove_ST, remove_new_listed"
         />
       </label>
+      <div className="readonly-strip">
+        <span>因子实现</span>
+        <strong>Codex 生成 Python 插件，经沙箱验证后执行</strong>
+      </div>
 
       {!editable && (
         <p className="form-hint">研究已开始执行或已完成，配置不可修改。</p>
@@ -651,6 +671,122 @@ function ResearchConfigView({
     </form>
   );
 }
+
+function MercuryStatusView({ result }: { result: Record<string, unknown> }) {
+  const status = asRecord(result.mercury_status);
+  const mercuryResults = asRecord(result.mercury_results || {});
+  const attempts = asRecord(status.attempts);
+
+  if (!Object.keys(status).length && !Object.keys(mercuryResults).length) {
+    return (
+      <EmptyBlock
+        title="暂无 Mercury 输出"
+        detail="当前 trace 没有 Mercury 尝试记录。新任务会保存 Mercury 状态、成功摘要或本地 fallback 原因。"
+      />
+    );
+  }
+
+  return (
+    <div className="artifact-stack">
+      <div className="summary-line">
+        <span>Mercury</span>
+        <strong>
+          {Object.keys(mercuryResults).length
+            ? `${Object.keys(mercuryResults).length} 个因子返回交易级结果`
+            : status.fallback
+              ? "已回退到本地因子分析"
+              : "等待交易级结果"}
+        </strong>
+      </div>
+      <KeyValueList data={{
+        enabled: status.enabled,
+        base_url: status.base_url,
+        attempted: status.attempted,
+        success_count: status.success_count,
+        attempt_count: status.attempt_count,
+      }} />
+      {asArray(status.notes).length > 0 && <BulletList items={asArray(status.notes)} />}
+      {Object.keys(mercuryResults).length > 0 && <JsonBlock value={mercuryResults} />}
+      {Object.keys(attempts).length > 0 && <JsonBlock value={attempts} />}
+    </div>
+  );
+}
+
+function FactorDataPreviewTable({ preview }: { preview: Record<string, unknown> }) {
+  const records = asArray(preview.records).map(asRecord);
+  if (!records.length) {
+    return null;
+  }
+  const columns = Object.keys(records[0]);
+  return (
+    <div className="table-wrap">
+      <table className="data-table compact">
+        <thead>
+          <tr>
+            {columns.map((column) => <th key={column}>{column}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {records.map((row, index) => (
+            <tr key={index}>
+              {columns.map((column) => <td key={column}>{textValue(row[column], "-")}</td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function CodexArtifactsView({ trace }: { trace: Record<string, unknown> }) {
+  const codeAgent = asRecord(trace.code_agent);
+  const sources = asArray(trace.factor_plugin_sources).map(asRecord);
+  const previews = asArray(trace.factor_data_previews).map(asRecord);
+  const manifests = asArray(trace.factor_data_manifests).map(asRecord);
+  const validations = asArray(trace.codegen_validation_reports).map(asRecord);
+  const errors = asArray(trace.pipeline_errors);
+
+  if (!Object.keys(codeAgent).length && !sources.length && !previews.length) {
+    return (
+      <EmptyBlock
+        title="暂无 Codex 因子产物"
+        detail="当前任务没有保存因子代码或数据预览。新任务默认使用 Codex 模式后会在这里展示插件源码、校验结果和样例数据。"
+      />
+    );
+  }
+
+  return (
+    <div className="artifact-stack">
+      <div className="summary-line">
+        <span>实现模式</span>
+        <strong>{asString(trace.factor_implementation_mode || "codex")}</strong>
+      </div>
+      {Object.keys(codeAgent).length > 0 && <KeyValueList data={codeAgent} />}
+      {errors.length > 0 && <BulletList items={errors} />}
+      {sources.map((source, index) => (
+        <section className="artifact-section" key={asString(source.factor_id || index)}>
+          <div className="artifact-heading">
+            <strong>{asString(source.factor_id || `factor_${index + 1}`)}</strong>
+            <span>{asString(source.source_sha256).slice(0, 12)}</span>
+          </div>
+          <CodeBlock code={asString(source.code)} />
+        </section>
+      ))}
+      {previews.map((preview, index) => (
+        <section className="artifact-section" key={asString(preview.factor_id || index)}>
+          <div className="artifact-heading">
+            <strong>因子数据样例：{asString(preview.factor_id)}</strong>
+            <span>{asArray(preview.shape).join(" x ")}</span>
+          </div>
+          <FactorDataPreviewTable preview={preview} />
+        </section>
+      ))}
+      {manifests.length > 0 && <JsonBlock value={manifests} />}
+      {validations.length > 0 && <JsonBlock value={validations} />}
+    </div>
+  );
+}
+
 function buildStages(
   projectId: string,
   project: ResearchProjectDetail | null,
@@ -666,17 +802,26 @@ function buildStages(
   const audit = asRecord(trace.audit_report);
   const backtest = asRecord(trace.backtest_result);
   const status = project?.status ?? "pending";
+  const ideaReady = Object.keys(idea).length > 0;
+  const researchReady = Object.keys(research).length > 0;
+  const completed = status === "completed";
 
   return [
     {
       title: "1. 智能研读",
       subtitle: "从原始想法中提炼投资假设、适用场景和潜在风险。",
-      content: Object.keys(idea).length ? <IdeaSpecView idea={idea} /> : <KeyValueList data={idea} />
+      status: ideaReady ? "completed" : "running",
+      content: ideaReady ? (
+        <IdeaSpecView idea={idea} />
+      ) : (
+        <EmptyBlock title="正在研读输入" detail="系统正在提炼投资假设，并生成可编辑的研究配置。" />
+      )
     },
     {
       title: "2. 研究配置",
       subtitle: "确认股票池、调仓频率、交易成本和回测约束。",
-      content: Object.keys(research).length ? (
+      status: researchReady ? (status === "pending" ? "running" : "completed") : "pending",
+      content: researchReady ? (
         <ResearchConfigView
           projectId={projectId}
           research={research}
@@ -685,12 +830,13 @@ function buildStages(
           onStart={onStart}
         />
       ) : (
-        <KeyValueList data={research} />
+        <EmptyBlock title="等待研读完成" detail="研究配置会在智能研读完成后出现。" />
       )
     },
     {
       title: "3. 候选因子",
       subtitle: "生成可比较的因子表达、公式和业务解释。",
+      status: factors.length ? "completed" : status === "running" ? "running" : "pending",
       content: (
         <div className="factor-list">
           {factors.length ? (
@@ -707,6 +853,7 @@ function buildStages(
     {
       title: "4. 表达式校验",
       subtitle: "检查候选因子是否能被受限表达式引擎解析。",
+      status: compiled.length ? "completed" : status === "running" ? "running" : "pending",
       content: (
         <div className="factor-list">
           {compiled.length ? (
@@ -726,31 +873,66 @@ function buildStages(
       )
     },
     {
-      title: "5. 回测摘要",
+      title: "5. Codex 因子产物",
+      subtitle: "展示生成的插件源码、沙箱校验和因子数据样例。",
+      status: asArray(trace.factor_plugin_sources).length || asArray(trace.factor_data_previews).length
+        ? "completed"
+        : status === "running"
+          ? "running"
+          : "pending",
+      content: <CodexArtifactsView trace={trace} />
+    },
+    {
+      title: "6. 回测摘要",
       subtitle: "汇总 IC、分层、多空和净值表现等关键结果。",
+      status: Object.keys(backtest).length ? "completed" : status === "running" ? "running" : "pending",
       content: <BacktestResultView result={Object.keys(backtest).length ? backtest : {}} />
     },
     {
-      title: "6. 结果解释",
+      title: "7. Mercury 交易回测",
+      subtitle: "展示 Mercury 服务调用状态、交易级结果或本地 fallback 原因。",
+      status: Object.keys(asRecord(backtest.mercury_status)).length || Object.keys(asRecord(backtest.mercury_results)).length
+        ? "completed"
+        : status === "running"
+          ? "running"
+          : "pending",
+      content: <MercuryStatusView result={backtest} />
+    },
+    {
+      title: "8. 结果解释",
       subtitle: "解释回测表现、异常波动和下一步验证方向。",
+      status: Object.keys(explanation).length ? "completed" : completed ? "completed" : "pending",
       content: <ExplanationView explanation={explanation} />
     },
     {
-      title: "7. 研究审计",
+      title: "9. 研究审计",
       subtitle: "检查未来函数、样本偏差、字段可得性和稳健性风险。",
+      status: Object.keys(audit).length ? "completed" : completed ? "completed" : "pending",
       content: <AuditResultView audit={audit} />
     }
   ];
+}
+
+function shouldPollProject(project: ResearchProjectDetail | null): boolean {
+  if (!project) return true;
+  if (project.status === "running") return true;
+  if (project.status === "pending") {
+    return project.progress_events.some((event) => event.status === "running");
+  }
+  return false;
 }
 
 export function ResearchDetailPage() {
   const { id = "" } = useParams();
   const [project, setProject] = useState<ResearchProjectDetail | null>(null);
   const [error, setError] = useState("");
+  const [railCollapsed, setRailCollapsed] = useState(false);
   const statusRef = useRef(project?.status);
+  const pollRef = useRef(true);
 
   useEffect(() => {
     statusRef.current = project?.status;
+    pollRef.current = shouldPollProject(project);
   }, [project?.status]);
 
   useEffect(() => {
@@ -760,7 +942,6 @@ export function ResearchDetailPage() {
     let disposed = false;
     let interval: number | undefined;
     let loading = false;
-    let lastStatus: string | undefined;
 
     async function load() {
       if (loading) {
@@ -773,7 +954,8 @@ export function ResearchDetailPage() {
           return;
         }
         setProject(next);
-        lastStatus = next.status;
+        statusRef.current = next.status;
+        pollRef.current = shouldPollProject(next);
       } catch (err) {
         if (!disposed) {
           setError(err instanceof Error ? err.message : "加载失败");
@@ -785,7 +967,7 @@ export function ResearchDetailPage() {
 
     // Poll while the project is running so the UI updates as the workflow progresses.
     interval = window.setInterval(() => {
-      if (statusRef.current === "running") {
+      if (pollRef.current || statusRef.current === "running") {
         load();
       }
     }, 1500);
@@ -803,6 +985,10 @@ export function ResearchDetailPage() {
     () => buildStages(id, project, setProject, setProject),
     [id, project]
   );
+  const visibleStages = useMemo(
+    () => stages.filter((stage) => (stage.status ?? "pending") !== "pending"),
+    [stages]
+  );
 
   if (error) {
     return <div className="panel form-error">{error}</div>;
@@ -811,37 +997,63 @@ export function ResearchDetailPage() {
     return <div className="panel loading-panel">正在加载研究详情...</div>;
   }
 
-  const reportHtml = marked.parse(project.report_markdown || "研究报告将在流程完成后生成。");
+  const hasReport = Boolean(project.report_markdown?.trim());
+  const reportHtml = marked.parse(project.report_markdown || "");
 
   return (
-    <div className="page-stack">
-      <section className="detail-header">
-        <span className={`status-pill ${project.status}`}>{statusLabel(project.status)}</span>
-        <h1>{project.title}</h1>
-        <p>{project.idea_text}</p>
-      </section>
-
-      <ProgressTimeline events={project.progress_events} status={project.status} />
-
-      <section className="stage-grid">
-        {stages.map((stage) => (
-          <article className="stage-card" key={stage.title}>
-            <div className="stage-card-heading">
-              <h2>{stage.title}</h2>
-              <p>{stage.subtitle}</p>
-            </div>
-            {stage.content}
-          </article>
-        ))}
-      </section>
-
-      <section className="report-panel">
-        <div className="stage-card-heading">
-          <h2>8. 研究报告</h2>
-          <p>汇总投资假设、因子定义、回测结论和风险提示。</p>
+    <div className="research-workspace">
+      <header className="research-header">
+        <div>
+          <span className={`status-pill ${project.status}`}>{statusLabel(project.status)}</span>
+          <h1>{project.title}</h1>
+          <p>{project.idea_text}</p>
         </div>
-        <article className="markdown-body" dangerouslySetInnerHTML={{ __html: reportHtml }} />
-      </section>
+      </header>
+
+      <div className={`research-layout ${railCollapsed ? "rail-collapsed" : ""}`}>
+        <main className="research-main">
+          {visibleStages.map((stage) => (
+            <section className={`work-section ${stage.status ?? "pending"}`} key={stage.title}>
+              <div className="work-section-heading">
+                <span className="work-step-dot" />
+                <div>
+                  <h2>{stage.title}</h2>
+                  <p>{stage.subtitle}</p>
+                </div>
+              </div>
+              <div className="work-section-body">{stage.content}</div>
+            </section>
+          ))}
+
+          {hasReport && (
+            <section className="work-section completed">
+              <div className="work-section-heading">
+                <span className="work-step-dot" />
+                <div>
+                  <h2>10. 研究报告</h2>
+                  <p>汇总投资假设、因子定义、回测结论和风险提示。</p>
+                </div>
+              </div>
+              <article className="markdown-body" dangerouslySetInnerHTML={{ __html: reportHtml }} />
+            </section>
+          )}
+        </main>
+
+        <aside className="research-rail">
+          <button
+            aria-label={railCollapsed ? "展开右侧进度栏" : "折叠右侧进度栏"}
+            className="icon-button rail-toggle"
+            title={railCollapsed ? "展开右侧进度栏" : "折叠右侧进度栏"}
+            type="button"
+            onClick={() => setRailCollapsed((value) => !value)}
+          >
+            {railCollapsed ? <PanelRightOpen size={17} /> : <PanelRightClose size={17} />}
+          </button>
+          {!railCollapsed && (
+            <ProgressTimeline events={project.progress_events} status={project.status} />
+          )}
+        </aside>
+      </div>
     </div>
   );
 }

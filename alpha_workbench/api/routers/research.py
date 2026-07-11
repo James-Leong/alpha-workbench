@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from threading import Thread
 import time
 from typing import Any
@@ -98,7 +99,12 @@ def _json_safe(value: Any) -> Any:
 def _summary_from_trace(trace: dict[str, Any]) -> str:
     idea = trace.get("idea_spec") or {}
     if isinstance(idea, dict):
-        hypothesis = idea.get("hypothesis") or idea.get("summary")
+        hypothesis = (
+            idea.get("core_hypothesis")
+            or idea.get("hypothesis")
+            or idea.get("summary")
+            or idea.get("idea_name")
+        )
         if hypothesis:
             return str(hypothesis)[:400]
     return "研究流程已完成。"
@@ -122,6 +128,24 @@ def _latest_run(db: Session, project_id: int, user_id: int) -> ResearchRun | Non
     ).first()
 
 
+def _normalize_progress_events(
+    events: list[dict[str, Any]],
+    project_status: str,
+) -> list[dict[str, Any]]:
+    """Return display-safe progress events without impossible mixed states."""
+
+    normalized = [dict(event) for event in events]
+    if project_status == "completed":
+        for event in normalized:
+            if event.get("status") == "running":
+                event["status"] = "completed"
+    elif project_status == "failed":
+        for event in normalized:
+            if event.get("status") == "running":
+                event["status"] = "failed"
+    return normalized
+
+
 def _project_summary(db: Session, project: ResearchProject) -> ResearchProjectSummary:
     latest = _latest_run(db, project.id or 0, project.user_id)
     return ResearchProjectSummary(
@@ -134,12 +158,18 @@ def _project_summary(db: Session, project: ResearchProject) -> ResearchProjectSu
         updated_at=project.updated_at,
         latest_run_id=latest.id if latest else None,
         current_step=latest.current_step if latest else "",
-        progress_events=latest.progress_events if latest else [],
+        progress_events=_normalize_progress_events(
+            latest.progress_events if latest else [],
+            project.status,
+        ),
     )
 
 
 def _append_progress(db: Session, run: ResearchRun, step: str, message: str) -> None:
-    events = list(run.progress_events or [])
+    events = [dict(event) for event in (run.progress_events or [])]
+    for event in events:
+        if event.get("status") == "running":
+            event["status"] = "completed"
     events.append(
         {
             "step": step,
@@ -156,7 +186,10 @@ def _append_progress(db: Session, run: ResearchRun, step: str, message: str) -> 
 
 
 def _finish_progress(db: Session, run: ResearchRun, status_value: str, message: str) -> None:
-    events = list(run.progress_events or [])
+    events = [dict(event) for event in (run.progress_events or [])]
+    for event in events:
+        if event.get("status") == "running":
+            event["status"] = status_value
     events.append(
         {
             "step": "完成",
@@ -167,6 +200,72 @@ def _finish_progress(db: Session, run: ResearchRun, status_value: str, message: 
     )
     run.current_step = "完成" if status_value == "completed" else "失败"
     run.progress_events = events
+
+
+def _run_initial_research(
+    project_id: int,
+    run_id: int,
+    user_id: int,
+    idea_input: str,
+    source_meta: dict[str, Any],
+) -> None:
+    """Extract the initial idea/research spec after the project page exists."""
+
+    with Session(engine) as db:
+        project = db.get(ResearchProject, project_id)
+        run = db.get(ResearchRun, run_id)
+        trace_record = db.exec(select(ResearchTrace).where(ResearchTrace.run_id == run_id)).first()
+        if project is None or run is None or trace_record is None or project.user_id != user_id:
+            return
+
+        try:
+            idea_spec = extract_idea(idea_input, source_meta)
+            research_spec = build_research_spec(idea_spec)
+            factor_execution = dict(research_spec.get("factor_execution") or {})
+            factor_execution["mode"] = "codex"
+            factor_execution["code_agent"] = "codex"
+            factor_execution.setdefault("fallback_to_expression", True)
+            research_spec["factor_execution"] = factor_execution
+
+            trace_record.trace_json = _json_safe(
+                {
+                    "input_text": project.idea_text,
+                    "idea_spec": idea_spec,
+                    "research_spec": research_spec,
+                }
+            )
+            run.current_step = "等待确认研究配置"
+            events = [dict(event) for event in (run.progress_events or [])]
+            for event in events:
+                if event.get("status") == "running":
+                    event["status"] = "completed"
+                    event["message"] = "已提炼投资假设，请确认研究配置。"
+            run.progress_events = events
+            project.status = "pending"
+            project.summary = _summary_from_trace(trace_record.trace_json)
+            project.updated_at = utcnow()
+            db.add(project)
+            db.add(run)
+            db.add(trace_record)
+            db.commit()
+        except Exception as exc:
+            run.status = "failed"
+            run.error = str(exc)
+            run.current_step = "智能研读失败"
+            _finish_progress(db, run, "failed", "智能研读失败，请检查输入或 PDF 内容。")
+            project.status = "failed"
+            project.summary = str(exc)[:400]
+            project.updated_at = utcnow()
+            db.add(project)
+            db.add(run)
+            db.commit()
+        finally:
+            pdf_path = source_meta.get("pdf_path")
+            if pdf_path:
+                try:
+                    os.unlink(str(pdf_path))
+                except OSError:
+                    pass
 
 
 def _run_resume_workflow(project_id: int, run_id: int, user_id: int) -> None:
@@ -297,8 +396,6 @@ async def create_project(
 
     tmp_path: str | None = None
     if is_pdf and project_file is not None:
-        import tempfile
-
         suffix = ".pdf" if str(filename).lower().endswith(".pdf") else ""
         file_bytes = project_file.file.read() if hasattr(project_file, "file") else b""
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -311,21 +408,6 @@ async def create_project(
         source_meta = {"source_type": "text"}
         idea_input = project_input
         display_input = project_input
-
-    try:
-        idea_spec = extract_idea(idea_input, source_meta)
-    finally:
-        if tmp_path is not None:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-    research_spec = build_research_spec(idea_spec)
-    partial_trace = {
-        "input_text": display_input,
-        "idea_spec": idea_spec,
-        "research_spec": research_spec,
-    }
 
     project = ResearchProject(
         user_id=user.id or 0,
@@ -342,13 +424,15 @@ async def create_project(
         user_id=user.id or 0,
         input_text=display_input,
         status="pending",
-        current_step="等待确认研究配置",
+        current_step="智能研读",
         progress_events=[
+            {**INITIAL_PROGRESS[0], "time": utcnow().isoformat(timespec="seconds")},
             {
-                **event,
+                "step": "智能研读",
+                "status": "running",
+                "message": "正在提炼投资假设并生成研究配置。",
                 "time": utcnow().isoformat(timespec="seconds"),
-            }
-            for event in INITIAL_PROGRESS
+            },
         ],
     )
     db.add(run)
@@ -359,12 +443,18 @@ async def create_project(
         ResearchTrace(
             run_id=run.id or 0,
             user_id=user.id or 0,
-            trace_json=_json_safe(partial_trace),
+            trace_json=_json_safe({"input_text": display_input}),
             report_markdown="",
             metrics_summary={},
         )
     )
     db.commit()
+
+    Thread(
+        target=_run_initial_research,
+        args=(project.id or 0, run.id or 0, user.id or 0, idea_input, source_meta),
+        daemon=True,
+    ).start()
 
     return get_project(project.id or 0, user, db)
 
@@ -384,7 +474,10 @@ def get_project_progress(
         run_id=latest.id if latest else None,
         status=project.status,
         current_step=latest.current_step if latest else "",
-        progress_events=latest.progress_events if latest else [],
+        progress_events=_normalize_progress_events(
+            latest.progress_events if latest else [],
+            project.status,
+        ),
     )
 
 
@@ -443,6 +536,11 @@ def update_research_spec(
     trace_record = db.exec(select(ResearchTrace).where(ResearchTrace.run_id == latest.id)).first()
     if trace_record is None:
         raise HTTPException(status_code=404, detail="没有找到研究路径记录")
+    if not (trace_record.trace_json or {}).get("research_spec"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="智能研读尚未完成，请稍后再保存配置。",
+        )
 
     updated_trace = _update_research_spec(trace_record.trace_json, update)
     trace_record.trace_json = _json_safe(updated_trace)
@@ -483,12 +581,20 @@ def start_project(
     trace_record = db.exec(select(ResearchTrace).where(ResearchTrace.run_id == latest.id)).first()
     if trace_record is None:
         raise HTTPException(status_code=404, detail="没有找到研究路径记录")
+    if not (trace_record.trace_json or {}).get("research_spec"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="智能研读尚未完成，请稍后再启动研究。",
+        )
 
     project.status = "running"
     project.updated_at = utcnow()
     latest.status = "running"
     latest.current_step = "生成候选因子"
-    events = list(latest.progress_events or [])
+    events = [dict(event) for event in (latest.progress_events or [])]
+    for event in events:
+        if event.get("status") == "running":
+            event["status"] = "completed"
     events.append(
         {
             "step": "研究执行",

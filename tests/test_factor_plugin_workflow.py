@@ -171,6 +171,10 @@ def test_pipeline_generates_validates_and_calculates_factor(tmp_path):
     assert artifacts["plugin_registry"]["location"].startswith("promoted/")
     assert artifacts["factor_data_manifests"][0]["source_sha256"]
     assert artifacts["factor_data_manifests"][0]["output_sha256"]
+    assert artifacts["factor_plugin_sources"][0]["factor_id"] == factor_id
+    assert "def calculate" in artifacts["factor_plugin_sources"][0]["code"]
+    assert artifacts["factor_data_previews"][0]["factor_id"] == factor_id
+    assert artifacts["factor_data_previews"][0]["records"]
     json.dumps(artifacts, ensure_ascii=False)
 
 

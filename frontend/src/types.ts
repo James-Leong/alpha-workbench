@@ -41,6 +41,7 @@ export type ResearchSpecUpdate = {
   sample_window_start?: string;
   sample_window_end?: string;
   filters?: string[];
+  factor_execution_mode?: "codex" | "expression";
 };
 
 export type ResearchRunProgress = {

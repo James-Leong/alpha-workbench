@@ -266,6 +266,7 @@ def run_factor_plugin_pipeline(
         promoted.path / "factor.py",
         factor_data,
     )
+    factor_source_path = promoted.path / "factor.py"
     trace_artifacts = {
         "factor_implementation_mode": "python_plugin",
         "code_agent": {
@@ -280,6 +281,17 @@ def run_factor_plugin_pipeline(
         "codegen_validation_reports": [validation_report],
         "plugin_registry": promoted.trace_dict(),
         "factor_data_manifests": [factor_manifest],
+        "factor_plugin_sources": [
+            {
+                "factor_id": manifest.factor_id,
+                "path": str(factor_source_path),
+                "source_sha256": factor_manifest["source_sha256"],
+                "code": _read_text_limited(factor_source_path),
+            }
+        ],
+        "factor_data_previews": [
+            _factor_data_preview(manifest.factor_id, factor_data)
+        ],
         "data_provider": "deterministic_pit_fixture",
         "pipeline_status": "passed",
         "pipeline_errors": [],
@@ -516,4 +528,40 @@ def _factor_data_manifest(
         "date_start": factor_data.index.min().date().isoformat(),
         "date_end": factor_data.index.max().date().isoformat(),
         "nan_ratio": nan_ratio,
+    }
+
+
+def _read_text_limited(path: Path, limit: int = 32_000) -> str:
+    source = path.read_text(encoding="utf-8")
+    if len(source) <= limit:
+        return source
+    return source[:limit] + "\n# ... truncated for trace display ...\n"
+
+
+def _factor_data_preview(
+    factor_id: str,
+    factor_data: pd.DataFrame,
+    *,
+    rows: int = 8,
+    cols: int = 6,
+) -> dict[str, Any]:
+    preview = factor_data.iloc[:rows, :cols].copy()
+    preview.index = preview.index.strftime("%Y-%m-%d")
+    return {
+        "factor_id": factor_id,
+        "shape": [int(factor_data.shape[0]), int(factor_data.shape[1])],
+        "columns": [str(col) for col in factor_data.columns[:cols]],
+        "index": [str(idx) for idx in preview.index],
+        "records": [
+            {
+                "date": str(index),
+                **{
+                    str(column): (
+                        None if pd.isna(value) else round(float(value), 6)
+                    )
+                    for column, value in row.items()
+                },
+            }
+            for index, row in preview.iterrows()
+        ],
     }

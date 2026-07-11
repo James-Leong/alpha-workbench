@@ -83,8 +83,11 @@ def run_backtest(
 
     factor_results: list[dict[str, Any]] = []
     mercury_results: dict[str, Any] = {}
+    mercury_attempts: dict[str, Any] = {}
     charts: dict[str, Any] = {}
     notes: list[str] = []
+    mercury_config = MercuryConfig()
+    mercury_enabled = bool(enable_mercury)
 
     try:
         mercury_engine = None
@@ -94,9 +97,13 @@ def run_backtest(
             mercury_engine = HybridBacktestEngine(
                 enable_plotting=True,
                 enable_llm_explanation=False,
-                mercury_config=MercuryConfig(),
+                mercury_config=mercury_config,
                 use_mercury=True,
             )
+            if not mercury_engine.use_mercury:
+                notes.append(
+                    f"Mercury service unavailable at {mercury_config.base_url}; used local fallback."
+                )
 
         local_engine = HybridBacktestEngine(
             enable_plotting=True,
@@ -183,6 +190,8 @@ def run_backtest(
 
             raw = report.raw_data or {}
             mr = raw.get("mercury_response")
+            if mr:
+                mercury_attempts[fid] = _compact_mercury_response(mr)
             if mr and mr.get("summary"):
                 enriched = dict(mr["summary"])
                 if mr.get("execution_view"):
@@ -273,6 +282,14 @@ def run_backtest(
             "research_universe": universe,
             "factor_results": factor_results,
             "mercury_results": {},
+            "mercury_status": {
+                "enabled": bool(enable_mercury),
+                "base_url": mercury_config.base_url,
+                "attempted": False,
+                "success_count": 0,
+                "fallback": True,
+                "notes": ["Hybrid engine encountered an error before Mercury status could be collected."],
+            },
             "charts": {},
             "is_mock": True,
             "uses_synthetic_factor_data": True,
@@ -292,11 +309,25 @@ def run_backtest(
         notes.append("No market data provided; used deterministic sample market data.")
 
     result_is_mock = (uses_synthetic_factor_data or uses_mock_market_data) and not mercury_results
+    mercury_status = {
+        "enabled": mercury_enabled,
+        "base_url": mercury_config.base_url,
+        "attempted": bool(mercury_attempts),
+        "success_count": len(mercury_results),
+        "attempt_count": len(mercury_attempts),
+        "fallback": len(mercury_results) == 0,
+        "attempts": mercury_attempts,
+        "notes": [
+            note for note in notes
+            if "Mercury" in note or "mercury" in note
+        ],
+    }
 
     return {
         "research_universe": universe,
         "factor_results": factor_results,
         "mercury_results": mercury_results,
+        "mercury_status": mercury_status,
         "charts": charts,
         "is_mock": result_is_mock,
         "uses_synthetic_factor_data": uses_synthetic_factor_data,
@@ -384,6 +415,8 @@ def _run_with_mercury_fallback(
             if (raw.get("mercury_response") or {}).get("summary"):
                 return report, "mercury"
             notes.append(f"Mercury returned no result for {fid}; used local fallback.")
+            if raw.get("mercury_response"):
+                return report, "local_fallback"
         except Exception as exc:
             logger.exception("Mercury backtest failed for %s; falling back to local", fid)
             notes.append(f"Mercury failed for {fid}: {exc}; used local fallback.")
@@ -403,3 +436,22 @@ def _parse_date(value: Any) -> date | None:
     if not value:
         return None
     return pd.to_datetime(value).date()
+
+
+def _compact_mercury_response(response: dict[str, Any]) -> dict[str, Any]:
+    """Keep Mercury diagnostics useful without storing oversized execution payloads."""
+
+    compact: dict[str, Any] = {
+        "job_id": response.get("job_id"),
+        "status": response.get("status"),
+        "error": response.get("error"),
+        "message": response.get("message"),
+    }
+    if response.get("summary"):
+        compact["summary"] = response["summary"]
+    if response.get("metrics"):
+        compact["metrics"] = response["metrics"]
+    run_spec = response.get("run_spec")
+    if isinstance(run_spec, dict):
+        compact["run_spec"] = run_spec
+    return {key: value for key, value in compact.items() if value not in (None, "")}
