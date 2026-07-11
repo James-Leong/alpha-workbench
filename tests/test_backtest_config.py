@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 
 import pandas as pd
+import pytest
 
 from alpha_workbench.backtest import engine as backtest_engine
 from alpha_workbench.backtest.hybrid_engine import HybridBacktestEngine
@@ -131,6 +132,87 @@ def test_run_backtest_maps_research_spec_to_backtest_input(monkeypatch):
     assert input_data.end_date == date(2024, 1, 31)
     assert input_data.commission_rate == 0.0015
     assert input_data.n_quantiles == 4
+
+
+def test_run_backtest_strict_mode_requires_every_factor():
+    dates = pd.date_range("2024-01-01", periods=20, freq="B")
+    symbols = [f"{index:06d}.XSHE" for index in range(12)]
+    factor_data = pd.DataFrame(1.0, index=dates, columns=symbols)
+
+    with pytest.raises(ValueError, match="FACTOR_B"):
+        backtest_engine.run_backtest(
+            [
+                {"factor_id": "FACTOR_A", "factor_name": "A"},
+                {"factor_id": "FACTOR_B", "factor_name": "B"},
+            ],
+            factor_data_dict={"FACTOR_A": factor_data},
+            require_factor_data=True,
+            enable_mercury=False,
+        )
+
+
+def test_run_backtest_strict_mode_rejects_empty_factor_frame():
+    with pytest.raises(ValueError, match="cannot be empty"):
+        backtest_engine.run_backtest(
+            [{"factor_id": "FACTOR_A", "factor_name": "A"}],
+            factor_data_dict={"FACTOR_A": pd.DataFrame()},
+            require_factor_data=True,
+            enable_mercury=False,
+        )
+
+
+def test_run_backtest_strict_mode_rejects_disjoint_market_coverage():
+    dates = pd.date_range("2024-01-01", periods=20, freq="B")
+    factor_symbols = [f"F{index:02d}" for index in range(12)]
+    price_symbols = [f"P{index:02d}" for index in range(12)]
+    factor_data = pd.DataFrame(1.0, index=dates, columns=factor_symbols)
+    price_data = pd.DataFrame(100.0, index=dates, columns=price_symbols)
+
+    with pytest.raises(ValueError, match="overlapping"):
+        backtest_engine.run_backtest(
+            [{"factor_id": "FACTOR_A", "factor_name": "A"}],
+            factor_data_dict={"FACTOR_A": factor_data},
+            price_data=price_data,
+            require_factor_data=True,
+            enable_mercury=False,
+        )
+
+
+def test_run_backtest_reports_factor_and_market_provenance(monkeypatch):
+    captured_inputs: list[BacktestInput] = []
+
+    class CapturingEngine:
+        def __init__(self, **kwargs):
+            self.use_mercury = False
+
+        def run_backtest(self, input_data: BacktestInput) -> BacktestReport:
+            captured_inputs.append(input_data)
+            return _minimal_report(input_data.factor_spec)
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(backtest_engine, "HybridBacktestEngine", CapturingEngine)
+    dates = pd.date_range("2024-01-01", periods=20, freq="B")
+    symbols = [f"{index:06d}.XSHE" for index in range(12)]
+    factor_data = pd.DataFrame(1.0, index=dates, columns=symbols)
+    price_data = pd.DataFrame(100.0, index=dates, columns=symbols)
+    returns_data = price_data.pct_change().shift(-1)
+
+    result = backtest_engine.run_backtest(
+        [{"factor_id": "TEST_FACTOR", "factor_name": "Test Factor"}],
+        factor_data_dict={"TEST_FACTOR": factor_data},
+        price_data=price_data,
+        returns_data=returns_data,
+        require_factor_data=True,
+        market_data_is_mock=True,
+        enable_mercury=False,
+    )
+
+    assert captured_inputs
+    assert result["uses_synthetic_factor_data"] is False
+    assert result["uses_mock_market_data"] is True
+    assert result["is_mock"] is True
 
 
 def test_run_backtest_uses_frontend_universe_for_generated_data(monkeypatch):
@@ -287,6 +369,35 @@ def test_run_backtest_uses_mercury_for_each_factor_before_local_fallback(monkeyp
     ]
     engines = {item["factor_id"]: item["engine"] for item in result["factor_results"]}
     assert engines == {"FACTOR_A": "mercury", "FACTOR_B": "local_fallback"}
+
+
+def test_run_backtest_handles_null_mercury_response(monkeypatch):
+    calls: list[bool] = []
+
+    class NullResponseEngine:
+        def __init__(self, **kwargs):
+            self.use_mercury = kwargs.get("use_mercury", False)
+
+        def run_backtest(self, input_data: BacktestInput) -> BacktestReport:
+            calls.append(self.use_mercury)
+            report = _minimal_report(input_data.factor_spec)
+            if self.use_mercury:
+                report.raw_data = {"mercury_response": None}
+            return report
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(backtest_engine, "HybridBacktestEngine", NullResponseEngine)
+
+    result = backtest_engine.run_backtest(
+        [{"factor_id": "TEST_FACTOR", "factor_name": "Test Factor"}],
+        {"sample_window": {"start": "2024-01-01", "end": "2024-02-29"}},
+        enable_mercury=True,
+    )
+
+    assert calls == [True, False]
+    assert result["factor_results"][0]["engine"] == "local_fallback"
 
 
 def test_run_backtest_is_not_mock_when_mercury_produces_results(monkeypatch):

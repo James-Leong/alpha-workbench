@@ -28,6 +28,8 @@ def run_backtest(
     price_data: pd.DataFrame | None = None,
     returns_data: pd.DataFrame | None = None,
     enable_mercury: bool = True,
+    require_factor_data: bool = False,
+    market_data_is_mock: bool = False,
 ) -> dict[str, Any]:
     """Run backtest for multiple factors using HybridBacktestEngine.
 
@@ -52,6 +54,18 @@ def run_backtest(
             "is_mock": True,
         }
 
+    if require_factor_data:
+        available = set(factor_data_dict or {})
+        required = {str(item.get("factor_id", "")) for item in factor_specs}
+        missing = sorted(required - available)
+        if missing:
+            raise ValueError(
+                "Strict factor-data mode requires computed data for every factor; "
+                f"missing: {', '.join(missing)}"
+            )
+        for factor_id in sorted(required):
+            _validate_strict_factor_frame(factor_id, factor_data_dict[factor_id])
+
     rs = research_spec or {}
     n_quantiles = rs.get("backtest", {}).get("groups", 5)
     universe = rs.get("universe", "sample_universe")
@@ -64,7 +78,8 @@ def run_backtest(
     # ── shared data caches (regenerated on first use) ──────────────────────
     shared_price: pd.DataFrame | None = price_data
     shared_returns: pd.DataFrame | None = returns_data
-    used_mock_data = False
+    uses_synthetic_factor_data = False
+    uses_mock_market_data = market_data_is_mock
 
     factor_results: list[dict[str, Any]] = []
     mercury_results: dict[str, Any] = {}
@@ -99,8 +114,9 @@ def run_backtest(
             if factor_data_dict and fid in factor_data_dict:
                 fdata = factor_data_dict[fid]
             else:
-                used_mock_data = True
+                uses_synthetic_factor_data = True
                 if shared_price is None:
+                    uses_mock_market_data = True
                     _, shared_price, shared_returns = generate_sample_data(
                         n_stocks=len(securities),
                         n_days=120,
@@ -114,7 +130,7 @@ def run_backtest(
                 fdata = _generate_synthetic_factor_data(shared_returns, fid, factor_idx)
 
             if shared_price is None:
-                used_mock_data = True
+                uses_mock_market_data = True
                 _, shared_price, shared_returns = generate_sample_data(
                     n_stocks=len(securities),
                     n_days=120,
@@ -126,6 +142,12 @@ def run_backtest(
             common_dates = fdata.index.intersection(shared_price.index)
             common_stocks = fdata.columns.intersection(shared_price.columns)
             if len(common_dates) < 10 or len(common_stocks) < 10:
+                if require_factor_data:
+                    raise ValueError(
+                        "Strict factor-data mode requires at least 10 overlapping dates and "
+                        f"10 overlapping symbols for {fid}; got "
+                        f"{len(common_dates)} dates and {len(common_stocks)} symbols"
+                    )
                 notes.append(f"Skipped {fid}: too few dates/stocks")
                 continue
 
@@ -208,10 +230,18 @@ def run_backtest(
         factor_results.sort(key=lambda r: r.get("sharpe_ratio", 0.0), reverse=True)
 
         n_m = len(mercury_results)
-        logger.info("Backtest complete: %d factors, %d Mercury results, mock=%s",
-                     len(factor_results), n_m, used_mock_data)
+        logger.info(
+            "Backtest complete: %d factors, %d Mercury results, synthetic_factor=%s, "
+            "mock_market=%s",
+            len(factor_results),
+            n_m,
+            uses_synthetic_factor_data,
+            uses_mock_market_data,
+        )
 
     except Exception:
+        if require_factor_data:
+            raise
         logger.exception("Hybrid backtest failed, falling back to mock")
         mock_result = mock_run_backtest(factor_specs, rs)
         factor_results = []
@@ -245,6 +275,8 @@ def run_backtest(
             "mercury_results": {},
             "charts": {},
             "is_mock": True,
+            "uses_synthetic_factor_data": True,
+            "uses_mock_market_data": True,
             "notes": ["Hybrid engine encountered an error; results are synthetic."],
         }
 
@@ -254,10 +286,12 @@ def run_backtest(
         if "local_engine" in locals() and local_engine is not None:
             local_engine.close()
 
-    if used_mock_data:
+    if uses_synthetic_factor_data:
         notes.append("No real factor data provided; used synthetic factor signals.")
+    if uses_mock_market_data:
+        notes.append("No market data provided; used deterministic sample market data.")
 
-    result_is_mock = used_mock_data and not mercury_results
+    result_is_mock = (uses_synthetic_factor_data or uses_mock_market_data) and not mercury_results
 
     return {
         "research_universe": universe,
@@ -265,9 +299,29 @@ def run_backtest(
         "mercury_results": mercury_results,
         "charts": charts,
         "is_mock": result_is_mock,
-        "uses_synthetic_factor_data": used_mock_data,
+        "uses_synthetic_factor_data": uses_synthetic_factor_data,
+        "uses_mock_market_data": uses_mock_market_data,
         "notes": notes,
     }
+
+
+def _validate_strict_factor_frame(factor_id: str, frame: object) -> None:
+    if not isinstance(frame, pd.DataFrame):
+        raise TypeError(f"Strict factor data for {factor_id} must be a pandas DataFrame")
+    if frame.empty:
+        raise ValueError(f"Strict factor data for {factor_id} cannot be empty")
+    if not isinstance(frame.index, pd.DatetimeIndex):
+        raise TypeError(f"Strict factor data for {factor_id} must use a DatetimeIndex")
+    if not frame.index.is_unique or not frame.index.is_monotonic_increasing:
+        raise ValueError(
+            f"Strict factor data for {factor_id} must have a unique, increasing index"
+        )
+    if not frame.columns.is_unique:
+        raise ValueError(f"Strict factor data for {factor_id} must have unique columns")
+    if len(frame.index) < 10 or len(frame.columns) < 10:
+        raise ValueError(
+            f"Strict factor data for {factor_id} requires at least 10 dates and 10 symbols"
+        )
 
 
 def _build_factor_spec(factor_dict: dict[str, Any]) -> FactorSpec:
@@ -327,7 +381,7 @@ def _run_with_mercury_fallback(
         try:
             report = mercury_engine.run_backtest(input_data)
             raw = report.raw_data or {}
-            if raw.get("mercury_response", {}).get("summary"):
+            if (raw.get("mercury_response") or {}).get("summary"):
                 return report, "mercury"
             notes.append(f"Mercury returned no result for {fid}; used local fallback.")
         except Exception as exc:

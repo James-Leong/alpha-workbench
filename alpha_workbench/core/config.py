@@ -76,6 +76,24 @@ class Settings:
         self.mercury_api_token = _getenv("MERCURY_API_TOKEN", "")
         self.mercury_base_url = _getenv("MERCURY_BASE_URL", "http://quant.futuri.top")
 
+        # Codex 因子代码生成。默认关闭，由 ResearchSpec 显式选择 codex 模式。
+        self.factor_code_agent = _getenv("FACTOR_CODE_AGENT", "codex").lower()
+        self.factor_code_timeout_seconds = int(
+            _getenv("FACTOR_CODE_TIMEOUT_SECONDS", "600")
+        )
+        self.factor_code_jobs_dir = Path(
+            _getenv(
+                "FACTOR_CODE_JOBS_DIR",
+                str(self.data_dir / "factor_code_jobs"),
+            )
+        )
+        self.factor_plugin_registry_dir = Path(
+            _getenv(
+                "FACTOR_PLUGIN_REGISTRY_DIR",
+                str(self.data_dir / "factor_plugins"),
+            )
+        )
+
         # 应用级/鉴权/数据库配置（保留旧 Settings 字段以兼容既有代码）
         self.database_url = _getenv(
             "DATABASE_URL",

@@ -8,7 +8,7 @@ from threading import Thread
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import ValidationError
 from sqlmodel import Session, select
 
@@ -51,6 +51,11 @@ def _update_research_spec(trace: dict[str, Any], update: ResearchSpecUpdate) -> 
         research["sample_window"] = sample_window
     if update.filters is not None:
         research["filters"] = update.filters
+    if update.factor_execution_mode is not None:
+        factor_execution = dict(research.get("factor_execution") or {})
+        factor_execution["mode"] = update.factor_execution_mode
+        factor_execution["code_agent"] = "codex"
+        research["factor_execution"] = factor_execution
 
     # Sync backtest sub-config with top-level values
     backtest = dict(research.get("backtest") or {})

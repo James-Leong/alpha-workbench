@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, EmailStr, Field
 
@@ -61,6 +61,7 @@ class ResearchSpecUpdate(BaseModel):
     sample_window_start: str | None = None
     sample_window_end: str | None = None
     filters: list[str] | None = None
+    factor_execution_mode: Literal["expression", "codex"] | None = None
 
 
 class ResearchRunProgress(BaseModel):

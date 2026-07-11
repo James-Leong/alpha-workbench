@@ -10,6 +10,13 @@ from typing import Any
 
 def _safe_json_default(obj: Any) -> Any:
     """兜底序列化：让 json.dumps 不因未知类型崩溃。"""
+    try:
+        from pydantic import BaseModel
+
+        if isinstance(obj, BaseModel):
+            return obj.model_dump(mode="json")
+    except ImportError:
+        pass
     # Plotly Figure — 用 to_json() 让 Plotly 自己处理内部所有 numpy 类型
     try:
         import plotly.graph_objs as go

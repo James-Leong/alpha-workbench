@@ -58,6 +58,11 @@ DEFAULT_RESEARCH_SPEC: dict[str, Any] = {
         "announcement_lag": "use_public_announcement_date",
         "forecast_proxy_allowed": True,
     },
+    "factor_execution": {
+        "mode": "expression",
+        "code_agent": "codex",
+        "fallback_to_expression": True,
+    },
     "is_mock": True,
 }
 

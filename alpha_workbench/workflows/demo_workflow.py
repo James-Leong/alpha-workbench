@@ -21,6 +21,7 @@ from alpha_workbench.workflows.agno_runtime import (
     workflow_response_content,
     workflow_runtime_metadata,
 )
+from alpha_workbench.workflows.factor_plugin_workflow import run_factor_plugin_pipeline
 
 DEFAULT_INPUT = "单季度净利润超预期，且公告前股价没有明显上涨的公司，未来可能获得超额收益。"
 
@@ -105,9 +106,47 @@ def run_resume_workflow(
     if progress_callback:
         progress_callback("正在编译因子表达式...")
     compiled_factors = compile_factors(factor_specs)
+
+    execution_config = dict(research_spec.get("factor_execution") or {})
+    execution_mode = str(execution_config.get("mode") or "expression").lower()
+    executed_factor_specs = factor_specs
+    plugin_artifacts: dict[str, Any] = {
+        "factor_implementation_mode": "expression_tree",
+        "pipeline_status": "not_requested",
+        "pipeline_errors": [],
+    }
+    backtest_kwargs: dict[str, Any] = {}
+    if execution_mode == "codex":
+        if progress_callback:
+            progress_callback("正在调用 Codex 生成并验证因子插件...")
+        try:
+            plugin_result = run_factor_plugin_pipeline(
+                factor_specs,
+                idea_spec,
+                research_spec,
+            )
+            executed_factor_specs = plugin_result.factor_specs
+            plugin_artifacts = plugin_result.trace_artifacts
+            backtest_kwargs = {
+                "factor_data_dict": plugin_result.factor_data_dict,
+                "price_data": plugin_result.price_data,
+                "returns_data": plugin_result.returns_data,
+                "require_factor_data": True,
+                "market_data_is_mock": plugin_artifacts.get("data_provider")
+                == "deterministic_pit_fixture",
+            }
+        except Exception as exc:
+            if not execution_config.get("fallback_to_expression", True):
+                raise
+            plugin_artifacts = {
+                "factor_implementation_mode": "expression_tree_fallback",
+                "code_agent": {"provider": "codex_exec", "is_mock": False},
+                "pipeline_status": "fallback",
+                "pipeline_errors": [str(exc)],
+            }
     if progress_callback:
         progress_callback("正在执行回测...")
-    backtest_result = run_backtest(factor_specs, research_spec)
+    backtest_result = run_backtest(executed_factor_specs, research_spec, **backtest_kwargs)
     if progress_callback:
         progress_callback("正在生成回测解释...")
     explanation = explain_backtest(backtest_result)
@@ -116,11 +155,14 @@ def run_resume_workflow(
         "input_text": input_text,
         "idea_spec": idea_spec,
         "research_spec": research_spec,
-        "factor_specs": factor_specs,
+        "factor_specs": executed_factor_specs,
+        "candidate_factor_specs": factor_specs,
+        "executed_factor_specs": executed_factor_specs,
         "compiled_factors": compiled_factors,
         "backtest_result": backtest_result,
         "explanation": explanation,
     }
+    partial_trace.update(plugin_artifacts)
     audit_report = run_audit(partial_trace)
     if progress_callback:
         progress_callback("正在生成研究报告...")
@@ -136,6 +178,15 @@ def run_resume_workflow(
     )
     trace["workflow_mode"] = "demo_workflow"
     trace["compiled_factors"] = compiled_factors
+    trace["executed_factor_specs"] = executed_factor_specs
+    trace.update(plugin_artifacts)
+    trace["uses_synthetic_factor_data"] = bool(
+        backtest_result.get("uses_synthetic_factor_data", True)
+    )
+    trace["uses_mock_market_data"] = bool(
+        backtest_result.get("uses_mock_market_data", True)
+    )
+    trace["is_mock"] = bool(backtest_result.get("is_mock", True))
     trace["report_markdown"] = generate_report(trace)
     if save_trace:
         trace["trace_path"] = save_research_trace(trace)
