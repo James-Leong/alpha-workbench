@@ -4,8 +4,6 @@
 """
 import logging
 import numpy as np
-
-logger = logging.getLogger(__name__)
 import pandas as pd
 from typing import Optional, Tuple
 
@@ -33,6 +31,8 @@ from alpha_workbench.backtest.mercury_adapter import (
     MercurySummary,
 )
 from alpha_workbench.backtest.rebalance import FactorRebalancer, RebalanceConfig
+
+logger = logging.getLogger(__name__)
 
 
 class HybridBacktestEngine:
@@ -154,6 +154,17 @@ class HybridBacktestEngine:
 
         # 7. 组装报告
         
+        raw_data = {
+            "engine": "local_fallback",
+            "mercury_summary": None,
+            "mercury_response": mercury_response.model_dump(mode="json") if mercury_response else None,
+        }
+        if self.enable_plotting:
+            raw_data.update({
+                "factor_data": factor_data,
+                "returns_data": returns_data,
+            })
+
         report = BacktestReport(
             factor_id=input_data.factor_spec.factor_id,
             factor_name=input_data.factor_spec.factor_name,
@@ -161,13 +172,7 @@ class HybridBacktestEngine:
             metrics=metrics,
             figures=figures,
             explanation=explanation,
-            raw_data={
-                "factor_data": factor_data,
-                "returns_data": returns_data,
-                "engine": "local_fallback",
-                "mercury_summary": None,
-                "mercury_response": mercury_response.model_dump(mode="json") if mercury_response else None,
-            } if self.enable_plotting else None
+            raw_data=raw_data,
         )
         
         return report
@@ -390,7 +395,10 @@ class HybridBacktestEngine:
             
             if response.error:
                 logger.warning("Mercury回测失败: %s", response.message)
-                return None
+                return response
+            if response.summary is None:
+                logger.warning("Mercury回测未返回摘要: status=%s job_id=%s", response.status, response.job_id)
+                return response
             
             logger.info("Mercury回测完成 (Job ID: %s)", response.job_id)
             logger.info("  - 总收益: %.2f%%", response.summary.total_return * 100)
@@ -557,7 +565,7 @@ class HybridBacktestEngine:
                 factor_spec,
                 backtest_period=backtest_period
             )
-            print(f"  ✓ LLM解释生成完成")
+            print("  ✓ LLM解释生成完成")
             print(f"    is_fallback: {explanation_result.is_fallback}")
             print(f"    quality_score: {explanation_result.get_quality_score()}")
 

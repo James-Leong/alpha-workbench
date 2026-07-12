@@ -6,11 +6,12 @@ import logging
 import os
 import time
 from typing import Dict, Any, Optional
-from datetime import datetime
 import httpx
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+load_dotenv()
 
 
 class MercuryConfig(BaseModel):
@@ -234,7 +235,7 @@ class MercuryAdapter:
                     error=error_data.get("error", "unknown"),
                     message=error_data.get("message", str(e))
                 )
-            except:
+            except Exception:
                 return MercuryBacktestResponse(
                     job_id="",
                     status="error",
@@ -290,7 +291,7 @@ class MercuryAdapter:
                     error=error_data.get("error", "unknown"),
                     message=error_data.get("message", str(e))
                 )
-            except:
+            except Exception:
                 return MercuryBacktestResponse(
                     job_id=job_id,
                     status="error",

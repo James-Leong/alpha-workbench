@@ -398,6 +398,54 @@ def test_run_backtest_handles_null_mercury_response(monkeypatch):
 
     assert calls == [True, False]
     assert result["factor_results"][0]["engine"] == "local_fallback"
+    assert result["mercury_status"]["attempted"] is True
+    assert result["mercury_status"]["attempt_count"] == 1
+    assert result["mercury_status"]["attempts"]["TEST_FACTOR"]["status"] == "no_result"
+
+
+def test_hybrid_engine_preserves_mercury_error_response_for_diagnostics():
+    dates = pd.date_range("2024-01-01", periods=12, freq="B")
+    columns = [f"{i:06d}.XSHE" for i in range(12)]
+    price_data = pd.DataFrame(
+        [[10 + day * 0.2 + col * 0.03 for col in range(12)] for day in range(12)],
+        index=dates,
+        columns=columns,
+    )
+    factor_data = pd.DataFrame(
+        [[day * 0.1 + col for col in range(12)] for day in range(12)],
+        index=dates,
+        columns=columns,
+    )
+    input_data = BacktestInput(
+        factor_spec=_factor_spec(),
+        factor_data=factor_data,
+        price_data=price_data,
+        returns_data=price_data.pct_change().shift(-1),
+        n_quantiles=3,
+    )
+
+    class MercuryStub:
+        def create_and_wait(self, run_spec):
+            return MercuryBacktestResponse(
+                job_id="job-error",
+                status="error",
+                error="bad_request",
+                message="invalid run spec",
+            )
+
+    hybrid = HybridBacktestEngine(
+        enable_plotting=False,
+        enable_llm_explanation=False,
+        use_mercury=False,
+    )
+    hybrid.use_mercury = True
+    hybrid.mercury = MercuryStub()
+
+    report = hybrid.run_backtest(input_data)
+
+    assert report.raw_data["engine"] == "local_fallback"
+    assert report.raw_data["mercury_response"]["error"] == "bad_request"
+    assert report.raw_data["mercury_response"]["message"] == "invalid run spec"
 
 
 def test_run_backtest_is_not_mock_when_mercury_produces_results(monkeypatch):

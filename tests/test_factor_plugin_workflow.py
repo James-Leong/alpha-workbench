@@ -104,6 +104,22 @@ class FakeCodeAgent:
         )
 
 
+class SchemaParameterFakeCodeAgent(FakeCodeAgent):
+    def generate(self, brief, destination):
+        result = super().generate(brief, destination)
+        manifest_path = result.job_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["parameters"] = {
+            "pre_return_weight": {
+                "type": "number",
+                "default": 0.5,
+                "minimum": 0,
+            }
+        }
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+        return result
+
+
 class RepairingFakeCodeAgent(FakeCodeAgent):
     def __init__(self) -> None:
         super().__init__()
@@ -162,6 +178,9 @@ def test_pipeline_generates_validates_and_calculates_factor(tmp_path):
 
     artifacts = result.trace_artifacts
     assert artifacts["code_agent"]["provider"] == "codex_exec"
+    assert "已生成 AlphaWorkbench 因子插件" in artifacts["code_agent"]["summary"]
+    assert artifacts["code_agent"]["risks"]
+    assert result.factor_specs[0]["factor_name"] == "行业中性盈利超预期"
     assert artifacts["codegen_validation_reports"][0]["status"] == "passed"
     check_names = {
         check["name"] for check in artifacts["codegen_validation_reports"][0]["checks"]
@@ -176,6 +195,22 @@ def test_pipeline_generates_validates_and_calculates_factor(tmp_path):
     assert artifacts["factor_data_previews"][0]["factor_id"] == factor_id
     assert artifacts["factor_data_previews"][0]["records"]
     json.dumps(artifacts, ensure_ascii=False)
+
+
+def test_pipeline_accepts_schema_style_parameter_defaults(tmp_path):
+    result = run_factor_plugin_pipeline(
+        _factor_specs(),
+        {"core_hypothesis": "公告后存在滞后定价"},
+        {"factor_execution": {"mode": "codex"}},
+        provider=SchemaParameterFakeCodeAgent(),
+        job_root=tmp_path,
+    )
+
+    artifacts = result.trace_artifacts
+    assert artifacts["pipeline_status"] == "passed"
+    assert artifacts["factor_runtime_parameters"][0]["parameters"] == {
+        "pre_return_weight": 0.5
+    }
 
 
 def test_pipeline_rejects_manifest_for_another_factor(tmp_path):

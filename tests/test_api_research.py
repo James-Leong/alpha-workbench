@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import importlib
 import sys
+from datetime import timedelta
+from pathlib import Path
 from threading import Event
 import time
 
 from fastapi.testclient import TestClient
-from sqlmodel import SQLModel
+from sqlmodel import SQLModel, Session
 
 
 def _client(tmp_path, monkeypatch) -> TestClient:
@@ -126,6 +128,11 @@ def test_create_and_read_research_project(tmp_path, monkeypatch):
         time.sleep(0.05)
     assert detail_payload["status"] == "completed"
     assert detail_payload["trace"]
+    assert all(
+        not event["step"].startswith("正在") and not event["message"].startswith("正在")
+        for event in detail_payload["progress_events"]
+        if event["status"] == "completed"
+    )
     assert detail_payload["report_markdown"]
     assert all(
         event["status"] != "running"
@@ -139,6 +146,42 @@ def test_create_and_read_research_project(tmp_path, monkeypatch):
     progress = client.get(f"/api/research/projects/{project['id']}/progress")
     assert progress.status_code == 200
     assert progress.json()["progress_events"]
+
+
+def test_detail_trace_display_localizes_old_codex_and_mercury_payloads(tmp_path, monkeypatch):
+    _client(tmp_path, monkeypatch)
+    import alpha_workbench.api.routers.research as research_router
+
+    trace = research_router._display_safe_trace(
+        {
+            "code_agent": {
+                "summary": "Implemented the AlphaWorkbench factor plugin.",
+                "risks": [
+                    "Literal upper-shadow calculation is impossible without open, high, low, and close fields.",
+                    "Tests were not executed.",
+                ],
+            },
+            "backtest_result": {
+                "mercury_status": {
+                    "notes": [
+                        "Mercury returned no result for weighted_upper_shadow_freq; used local fallback."
+                    ],
+                    "attempts": {
+                        "weighted_upper_shadow_freq": {
+                            "message": (
+                                "Mercury returned no result for weighted_upper_shadow_freq; "
+                                "used local fallback."
+                            )
+                        }
+                    },
+                }
+            },
+        }
+    )
+
+    assert trace["code_agent"]["summary"].startswith("已生成")
+    assert all("Mercury returned" not in note for note in trace["backtest_result"]["mercury_status"]["notes"])
+    assert all("Literal" not in risk and "Tests were" not in risk for risk in trace["code_agent"]["risks"])
 
 
 def test_create_project_returns_before_initial_research_finishes(tmp_path, monkeypatch):
@@ -189,6 +232,98 @@ def test_create_project_returns_before_initial_research_finishes(tmp_path, monke
         time.sleep(0.05)
 
     assert detail.json()["trace"]["idea_spec"]["idea_name"] == "异步研读"
+
+
+def test_running_project_persists_factor_stage_outputs(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    import alpha_workbench.api.routers.research as research_router
+
+    stage_written = Event()
+    finish_workflow = Event()
+    idea_spec = {
+        "idea_name": "阶段性输出",
+        "core_hypothesis": "后台运行时也应展示候选因子和表达式校验。",
+    }
+    factor_specs = [
+        {
+            "factor_id": "earnings_surprise_gap",
+            "factor_name": "盈利超预期缺口",
+            "plain_description": "盈利超预期且公告前涨幅有限。",
+            "formula_tree": {"op": "sub", "args": ["quarter_net_profit", "expected_net_profit"]},
+        }
+    ]
+    compiled_factors = [
+        {
+            "factor_id": "earnings_surprise_gap",
+            "factor_name": "盈利超预期缺口",
+            "status": "compiled",
+            "expression_tree_valid": True,
+        }
+    ]
+
+    def fake_run_resume_workflow(**kwargs):
+        kwargs["trace_update_callback"]({"factor_specs": factor_specs})
+        kwargs["trace_update_callback"]({"compiled_factors": compiled_factors})
+        stage_written.set()
+        finish_workflow.wait(timeout=2)
+        return {
+            "input_text": "test",
+            "workflow_mode": "demo_workflow",
+            "is_mock": True,
+            "idea_spec": idea_spec,
+            "research_spec": kwargs["research_spec"],
+            "factor_specs": factor_specs,
+            "compiled_factors": compiled_factors,
+            "backtest_result": {"metrics": {"ic_mean": 0.01}},
+            "explanation": {},
+            "audit_report": {"checks": []},
+            "report_markdown": "# report",
+        }
+
+    monkeypatch.setattr(research_router, "extract_idea", lambda text, source_meta=None: idea_spec)
+    monkeypatch.setattr(research_router, "run_resume_workflow", fake_run_resume_workflow)
+
+    register = client.post(
+        "/api/auth/register",
+        json={
+            "email": "stages@example.com",
+            "username": "stageuser",
+            "password": "strong-password",
+        },
+    )
+    csrf = register.json()["csrf_token"]
+
+    created = client.post(
+        "/api/research/projects",
+        headers={"X-CSRF-Token": csrf},
+        json={"title": "阶段性输出", "input_text": "test input"},
+    )
+    project_id = created.json()["id"]
+    for _ in range(20):
+        detail = client.get(f"/api/research/projects/{project_id}")
+        if detail.json()["trace"].get("research_spec"):
+            break
+        time.sleep(0.05)
+
+    started = client.post(
+        f"/api/research/projects/{project_id}/start",
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert started.status_code == 200
+
+    assert stage_written.wait(timeout=2)
+    running_detail = client.get(f"/api/research/projects/{project_id}").json()
+    assert running_detail["status"] == "running"
+    assert running_detail["trace"]["factor_specs"] == factor_specs
+    assert running_detail["trace"]["compiled_factors"] == compiled_factors
+
+    finish_workflow.set()
+    for _ in range(20):
+        completed = client.get(f"/api/research/projects/{project_id}").json()
+        if completed["status"] == "completed":
+            break
+        time.sleep(0.05)
+    assert completed["status"] == "completed"
 
 
 def test_update_spec_rejected_after_start(tmp_path, monkeypatch):
@@ -304,3 +439,85 @@ def test_start_requires_pending(tmp_path, monkeypatch):
         headers={"X-CSRF-Token": csrf},
     )
     assert second.status_code == 409
+
+
+def test_stale_codex_run_is_failed_on_progress_read(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    import alpha_workbench.api.routers.research as research_router
+    from alpha_workbench.api.models import (
+        ResearchProject,
+        ResearchRun,
+        ResearchTrace,
+        utcnow,
+    )
+
+    monkeypatch.setattr(research_router, "_stale_codex_timeout_seconds", lambda: 1)
+    monkeypatch.setattr(research_router.core_settings, "data_dir", tmp_path / "data")
+
+    register = client.post(
+        "/api/auth/register",
+        json={
+            "email": "stale@example.com",
+            "username": "staleuser",
+            "password": "strong-password",
+        },
+    )
+    user_id = register.json()["id"]
+
+    stale_time = (utcnow() - timedelta(seconds=10)).isoformat(timespec="seconds")
+    with Session(research_router.engine) as db:
+        project = ResearchProject(
+            user_id=user_id,
+            title="stale codex",
+            idea_text="test input",
+            status="running",
+        )
+        db.add(project)
+        db.commit()
+        db.refresh(project)
+        run = ResearchRun(
+            project_id=project.id or 0,
+            user_id=user_id,
+            input_text="test input",
+            status="running",
+            current_step="正在调用 Codex 生成并验证因子插件",
+            progress_events=[
+                {
+                    "step": "正在调用 Codex 生成并验证因子插件",
+                    "status": "running",
+                    "message": "正在调用 Codex 生成并验证因子插件...",
+                    "time": stale_time,
+                }
+            ],
+        )
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+        db.add(
+            ResearchTrace(
+                run_id=run.id or 0,
+                user_id=user_id,
+                trace_json={"input_text": "test input"},
+                report_markdown="",
+                metrics_summary={},
+            )
+        )
+        db.commit()
+        project_id = project.id or 0
+
+    progress = client.get(f"/api/research/projects/{project_id}/progress")
+    assert progress.status_code == 200
+    payload = progress.json()
+    assert payload["status"] == "failed"
+    assert payload["current_step"] == "失败"
+    assert all(event["status"] != "running" for event in payload["progress_events"])
+    assert "Codex 因子插件生成超过超时阈值" in payload["progress_events"][-1]["message"]
+
+    detail = client.get(f"/api/research/projects/{project_id}")
+    diagnostics = detail.json()["trace"]["workflow_diagnostics"]
+    assert diagnostics[-1]["stage"] == "stale_codex_run"
+    assert diagnostics[-1]["project_id"] == project_id
+    assert diagnostics[-1]["current_step"] == "正在调用 Codex 生成并验证因子插件"
+    log_path = Path(detail.json()["trace"]["run_log_path"])
+    assert log_path.is_file()
+    assert '"event": "stale_codex_run"' in log_path.read_text(encoding="utf-8")

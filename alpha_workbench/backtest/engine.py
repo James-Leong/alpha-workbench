@@ -102,7 +102,7 @@ def run_backtest(
             )
             if not mercury_engine.use_mercury:
                 notes.append(
-                    f"Mercury service unavailable at {mercury_config.base_url}; used local fallback."
+                    f"Mercury 服务不可用（{mercury_config.base_url}），已回退到本地因子分析。"
                 )
 
         local_engine = HybridBacktestEngine(
@@ -181,7 +181,7 @@ def run_backtest(
                 commission_rate=commission_rate,
             )
 
-            report, engine_name = _run_with_mercury_fallback(
+            report, engine_name, mercury_attempt = _run_with_mercury_fallback(
                 input_data=input_data,
                 mercury_engine=mercury_engine,
                 local_engine=local_engine,
@@ -190,6 +190,8 @@ def run_backtest(
 
             raw = report.raw_data or {}
             mr = raw.get("mercury_response")
+            if mercury_attempt:
+                mercury_attempts[fid] = mercury_attempt
             if mr:
                 mercury_attempts[fid] = _compact_mercury_response(mr)
             if mr and mr.get("summary"):
@@ -405,23 +407,39 @@ def _run_with_mercury_fallback(
     mercury_engine: HybridBacktestEngine | None,
     local_engine: HybridBacktestEngine,
     notes: list[str],
-) -> tuple[Any, str]:
+) -> tuple[Any, str, dict[str, Any] | None]:
     """Run one factor through Mercury first, falling back to local on failure."""
     fid = input_data.factor_spec.factor_id
     if mercury_engine is not None and mercury_engine.use_mercury:
         try:
             report = mercury_engine.run_backtest(input_data)
             raw = report.raw_data or {}
-            if (raw.get("mercury_response") or {}).get("summary"):
-                return report, "mercury"
-            notes.append(f"Mercury returned no result for {fid}; used local fallback.")
-            if raw.get("mercury_response"):
-                return report, "local_fallback"
+            mercury_response = raw.get("mercury_response")
+            if (mercury_response or {}).get("summary"):
+                return report, "mercury", _compact_mercury_response(mercury_response)
+            message = f"Mercury 未返回 {fid} 的交易级结果，已回退到本地因子分析。"
+            notes.append(message)
+            attempt = {
+                "status": "no_result",
+                "message": message,
+                "fallback": True,
+            }
+            if mercury_response:
+                attempt.update(_compact_mercury_response(mercury_response))
+                return report, "local_fallback", attempt
+            return local_engine.run_backtest(input_data), "local_fallback", attempt
         except Exception as exc:
             logger.exception("Mercury backtest failed for %s; falling back to local", fid)
-            notes.append(f"Mercury failed for {fid}: {exc}; used local fallback.")
+            message = f"Mercury 调用 {fid} 失败：{exc}；已回退到本地因子分析。"
+            notes.append(message)
+            return local_engine.run_backtest(input_data), "local_fallback", {
+                "status": "failed",
+                "error": str(exc),
+                "message": message,
+                "fallback": True,
+            }
 
-    return local_engine.run_backtest(input_data), "local_fallback"
+    return local_engine.run_backtest(input_data), "local_fallback", None
 
 
 def _build_research_spec(research_spec: dict[str, Any]) -> ResearchSpec | None:

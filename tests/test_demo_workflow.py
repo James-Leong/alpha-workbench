@@ -124,3 +124,29 @@ def test_run_resume_workflow_codex_mode_passes_computed_factor_data(monkeypatch)
     assert trace["pipeline_status"] == "passed"
     assert trace["uses_synthetic_factor_data"] is False
     assert trace["uses_mock_market_data"] is True
+
+
+def test_run_resume_workflow_codex_fallback_records_error_details(monkeypatch):
+    monkeypatch.setattr(settings, "llm_api_key", "")
+
+    def fail_pipeline(*args, **kwargs):
+        raise RuntimeError("codex repair timed out")
+
+    monkeypatch.setattr(demo_workflow, "run_factor_plugin_pipeline", fail_pipeline)
+    research_spec = clone_default_research_spec()
+    research_spec["factor_execution"] = {
+        "mode": "codex",
+        "code_agent": "codex",
+        "fallback_to_expression": True,
+    }
+
+    trace = run_resume_workflow(
+        input_text="earnings surprise",
+        idea_spec=clone_default_idea_spec(),
+        research_spec=research_spec,
+    )
+
+    assert trace["pipeline_status"] == "fallback"
+    assert trace["pipeline_errors"] == ["codex repair timed out"]
+    assert trace["pipeline_error_details"][0]["error_type"] == "RuntimeError"
+    assert "fail_pipeline" in trace["pipeline_error_details"][0]["traceback_tail"]
