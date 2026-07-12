@@ -9,11 +9,66 @@ import { statusLabel } from "../components/status";
 import type { ProgressEvent, ResearchProjectDetail, ResearchSpecUpdate } from "../types";
 
 type Stage = {
+  id: number;
   title: string;
   subtitle: string;
   status?: string;
   content: React.ReactNode;
 };
+
+function inferCurrentStageId(project: ResearchProjectDetail | null): number {
+  if (!project) return 1;
+
+  const trace = project.trace ?? {};
+  const idea = asRecord(trace.idea_spec);
+  const research = asRecord(trace.research_spec);
+  const factors = asArray(trace.factor_specs);
+  const compiled = asArray(trace.compiled_factors);
+  const codeAgent = asRecord(trace.code_agent);
+  const pluginSources = asArray(trace.factor_plugin_sources);
+  const factorPreviews = asArray(trace.factor_data_previews);
+  const backtest = asRecord(trace.backtest_result);
+  const explanation = asRecord(trace.explanation);
+  const audit = asRecord(trace.audit_report);
+  const currentStep = asString(project.current_step);
+
+  let furthestVisibleStage = Object.keys(idea).length ? 1 : 0;
+  if (Object.keys(research).length) furthestVisibleStage = Math.max(furthestVisibleStage, 2);
+  if (factors.length) furthestVisibleStage = Math.max(furthestVisibleStage, 3);
+  if (compiled.length) furthestVisibleStage = Math.max(furthestVisibleStage, 4);
+  if (Object.keys(codeAgent).length || pluginSources.length || factorPreviews.length) {
+    furthestVisibleStage = Math.max(furthestVisibleStage, 5);
+  }
+  if (Object.keys(backtest).length) furthestVisibleStage = Math.max(furthestVisibleStage, 7);
+  if (Object.keys(explanation).length) furthestVisibleStage = Math.max(furthestVisibleStage, 8);
+  if (Object.keys(audit).length) furthestVisibleStage = Math.max(furthestVisibleStage, 9);
+
+  if (project.status === "completed") {
+    return 9;
+  }
+
+  const stepMappings: Array<[string, number]> = [
+    ["智能研读", 1],
+    ["等待确认研究配置", 2],
+    ["研究配置", 2],
+    ["候选因子", 3],
+    ["表达式", 4],
+    ["Codex", 5],
+    ["因子插件", 5],
+    ["执行回测", 6],
+    ["回测解释", 8],
+    ["研究报告", 9],
+    ["完成", 9],
+  ];
+
+  const stepStageId = stepMappings.find(([keyword]) => currentStep.includes(keyword))?.[1] ?? 0;
+
+  if (project.status === "pending") {
+    return Math.max(furthestVisibleStage, Object.keys(research).length ? 2 : 1);
+  }
+
+  return Math.max(furthestVisibleStage, stepStageId, 1);
+}
 
 function textValue(value: unknown, fallback = "暂无内容") {
   if (value === null || value === undefined || value === "") {
@@ -802,15 +857,18 @@ function buildStages(
   const audit = asRecord(trace.audit_report);
   const backtest = asRecord(trace.backtest_result);
   const status = project?.status ?? "pending";
+  const currentStageId = inferCurrentStageId(project);
   const ideaReady = Object.keys(idea).length > 0;
   const researchReady = Object.keys(research).length > 0;
   const completed = status === "completed";
+  const pluginArtifactsReady = asArray(trace.factor_plugin_sources).length > 0 || asArray(trace.factor_data_previews).length > 0;
 
   return [
     {
+      id: 1,
       title: "1. 智能研读",
       subtitle: "从原始想法中提炼投资假设、适用场景和潜在风险。",
-      status: ideaReady ? "completed" : "running",
+      status: ideaReady ? "completed" : currentStageId === 1 ? "running" : "pending",
       content: ideaReady ? (
         <IdeaSpecView idea={idea} />
       ) : (
@@ -818,6 +876,7 @@ function buildStages(
       )
     },
     {
+      id: 2,
       title: "2. 研究配置",
       subtitle: "确认股票池、调仓频率、交易成本和回测约束。",
       status: researchReady ? (status === "pending" ? "running" : "completed") : "pending",
@@ -834,9 +893,10 @@ function buildStages(
       )
     },
     {
+      id: 3,
       title: "3. 候选因子",
       subtitle: "生成可比较的因子表达、公式和业务解释。",
-      status: factors.length ? "completed" : status === "running" ? "running" : "pending",
+      status: factors.length ? "completed" : currentStageId === 3 ? "running" : currentStageId > 3 ? "completed" : "pending",
       content: (
         <div className="factor-list">
           {factors.length ? (
@@ -851,9 +911,10 @@ function buildStages(
       )
     },
     {
+      id: 4,
       title: "4. 表达式校验",
       subtitle: "检查候选因子是否能被受限表达式引擎解析。",
-      status: compiled.length ? "completed" : status === "running" ? "running" : "pending",
+      status: compiled.length ? "completed" : currentStageId === 4 ? "running" : currentStageId > 4 ? "completed" : "pending",
       content: (
         <div className="factor-list">
           {compiled.length ? (
@@ -873,41 +934,50 @@ function buildStages(
       )
     },
     {
+      id: 5,
       title: "5. Codex 因子产物",
       subtitle: "展示生成的插件源码、沙箱校验和因子数据样例。",
-      status: asArray(trace.factor_plugin_sources).length || asArray(trace.factor_data_previews).length
+      status: pluginArtifactsReady
         ? "completed"
-        : status === "running"
+        : currentStageId === 5
           ? "running"
-          : "pending",
+          : currentStageId > 5
+            ? "completed"
+            : "pending",
       content: <CodexArtifactsView trace={trace} />
     },
     {
+      id: 6,
       title: "6. 回测摘要",
       subtitle: "汇总 IC、分层、多空和净值表现等关键结果。",
-      status: Object.keys(backtest).length ? "completed" : status === "running" ? "running" : "pending",
+      status: Object.keys(backtest).length ? "completed" : currentStageId === 6 ? "running" : currentStageId > 6 ? "completed" : "pending",
       content: <BacktestResultView result={Object.keys(backtest).length ? backtest : {}} />
     },
     {
+      id: 7,
       title: "7. Mercury 交易回测",
       subtitle: "展示 Mercury 服务调用状态、交易级结果或本地 fallback 原因。",
       status: Object.keys(asRecord(backtest.mercury_status)).length || Object.keys(asRecord(backtest.mercury_results)).length
         ? "completed"
-        : status === "running"
+        : currentStageId === 7
           ? "running"
-          : "pending",
+          : currentStageId > 7
+            ? "completed"
+            : "pending",
       content: <MercuryStatusView result={backtest} />
     },
     {
+      id: 8,
       title: "8. 结果解释",
       subtitle: "解释回测表现、异常波动和下一步验证方向。",
-      status: Object.keys(explanation).length ? "completed" : completed ? "completed" : "pending",
+      status: Object.keys(explanation).length ? "completed" : currentStageId === 8 ? "running" : completed ? "completed" : "pending",
       content: <ExplanationView explanation={explanation} />
     },
     {
+      id: 9,
       title: "9. 研究审计",
       subtitle: "检查未来函数、样本偏差、字段可得性和稳健性风险。",
-      status: Object.keys(audit).length ? "completed" : completed ? "completed" : "pending",
+      status: Object.keys(audit).length ? "completed" : currentStageId === 9 ? "running" : completed ? "completed" : "pending",
       content: <AuditResultView audit={audit} />
     }
   ];
@@ -985,9 +1055,10 @@ export function ResearchDetailPage() {
     () => buildStages(id, project, setProject, setProject),
     [id, project]
   );
+  const currentStageId = useMemo(() => inferCurrentStageId(project), [project]);
   const visibleStages = useMemo(
-    () => stages.filter((stage) => (stage.status ?? "pending") !== "pending"),
-    [stages]
+    () => stages.filter((stage) => stage.id <= currentStageId && (stage.status ?? "pending") !== "pending"),
+    [currentStageId, stages]
   );
 
   if (error) {
