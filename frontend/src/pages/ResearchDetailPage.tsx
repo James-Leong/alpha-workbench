@@ -1096,7 +1096,7 @@ export function ResearchDetailPage() {
   const reportHtml = marked.parse(project.report_markdown || "");
 
   return (
-    <div className="research-workspace">
+    <div className={`research-workspace ${railCollapsed ? "rail-collapsed" : ""}`}>
       <header className="research-header">
         <div>
           <span className={`status-pill ${project.status}`}>{statusLabel(project.status)}</span>
@@ -1105,36 +1105,12 @@ export function ResearchDetailPage() {
         </div>
       </header>
 
-      <div className={`research-layout ${railCollapsed ? "rail-collapsed" : ""}`}>
-        <main className="research-main">
-          {visibleStages.map((stage) => (
-            <section className={`work-section ${stage.status ?? "pending"}`} key={stage.title}>
-              <div className="work-section-heading">
-                <span className="work-step-dot" />
-                <div>
-                  <h2>{stage.title}</h2>
-                  <p>{stage.subtitle}</p>
-                </div>
-              </div>
-              <div className="work-section-body">{stage.content}</div>
-            </section>
-          ))}
-
-          {hasReport && (
-            <section className="work-section completed">
-              <div className="work-section-heading">
-                <span className="work-step-dot" />
-                <div>
-                  <h2>10. 研究报告</h2>
-                  <p>汇总投资假设、因子定义、回测结论和风险提示。</p>
-                </div>
-              </div>
-              <article className="markdown-body" dangerouslySetInnerHTML={{ __html: reportHtml }} />
-            </section>
-          )}
-        </main>
-
-        <aside className="research-rail">
+      <aside className="research-rail">
+        <div className="research-rail-header">
+          <div className="research-rail-title" aria-hidden={railCollapsed}>
+            <strong>研究进度</strong>
+            <span>阶段追踪</span>
+          </div>
           <button
             aria-label={railCollapsed ? "展开右侧进度栏" : "折叠右侧进度栏"}
             className="icon-button rail-toggle"
@@ -1144,11 +1120,39 @@ export function ResearchDetailPage() {
           >
             {railCollapsed ? <PanelRightOpen size={17} /> : <PanelRightClose size={17} />}
           </button>
-          {!railCollapsed && (
-            <ProgressTimeline events={project.progress_events} status={project.status} />
-          )}
-        </aside>
-      </div>
+        </div>
+        <div className="research-rail-content" aria-hidden={railCollapsed}>
+          <ProgressTimeline events={project.progress_events} status={project.status} />
+        </div>
+      </aside>
+
+      <main className="research-main">
+        {visibleStages.map((stage) => (
+          <section className={`work-section ${stage.status ?? "pending"}`} key={stage.title}>
+            <div className="work-section-heading">
+              <span className="work-step-dot" />
+              <div>
+                <h2>{stage.title}</h2>
+                <p>{stage.subtitle}</p>
+              </div>
+            </div>
+            <div className="work-section-body">{stage.content}</div>
+          </section>
+        ))}
+
+        {hasReport && (
+          <section className="work-section completed">
+            <div className="work-section-heading">
+              <span className="work-step-dot" />
+              <div>
+                <h2>10. 研究报告</h2>
+                <p>汇总投资假设、因子定义、回测结论和风险提示。</p>
+              </div>
+            </div>
+            <article className="markdown-body" dangerouslySetInnerHTML={{ __html: reportHtml }} />
+          </section>
+        )}
+      </main>
     </div>
   );
 }
