@@ -283,6 +283,16 @@ def _run_resume_workflow(project_id: int, run_id: int, user_id: int) -> None:
         def progress_callback(message: str) -> None:
             _append_progress(db, run, message.replace("...", "").replace("。", ""), message)
 
+        def trace_update_callback(updates: dict[str, Any]) -> None:
+            current_trace = dict(trace_record.trace_json or {})
+            current_trace.update(updates)
+            trace_record.trace_json = _json_safe(current_trace)
+            project.updated_at = utcnow()
+            db.add(project)
+            db.add(trace_record)
+            db.commit()
+            db.refresh(trace_record)
+
         try:
             trace_json = trace_record.trace_json or {}
             input_text = str(trace_json.get("input_text") or project.idea_text)
@@ -294,6 +304,7 @@ def _run_resume_workflow(project_id: int, run_id: int, user_id: int) -> None:
                 research_spec=research_spec,
                 save_trace=False,
                 progress_callback=progress_callback,
+                trace_update_callback=trace_update_callback,
             )
             safe_trace = _json_safe(trace)
             report = str(safe_trace.get("report_markdown") or "")

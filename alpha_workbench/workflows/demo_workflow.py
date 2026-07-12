@@ -94,6 +94,7 @@ def run_resume_workflow(
     *,
     save_trace: bool = False,
     progress_callback: Any | None = None,
+    trace_update_callback: Any | None = None,
 ) -> dict[str, Any]:
     """Run the workflow stages after idea extraction using the provided research spec.
 
@@ -103,9 +104,19 @@ def run_resume_workflow(
     if progress_callback:
         progress_callback("正在生成候选因子...")
     factor_specs = generate_factors(idea_spec, research_spec)
+    if trace_update_callback:
+        trace_update_callback(
+            {
+                "factor_specs": factor_specs,
+                "candidate_factor_specs": factor_specs,
+                "executed_factor_specs": factor_specs,
+            }
+        )
     if progress_callback:
         progress_callback("正在编译因子表达式...")
     compiled_factors = compile_factors(factor_specs)
+    if trace_update_callback:
+        trace_update_callback({"compiled_factors": compiled_factors})
 
     execution_config = dict(research_spec.get("factor_execution") or {})
     execution_mode = str(execution_config.get("mode") or "expression").lower()
@@ -127,6 +138,13 @@ def run_resume_workflow(
             )
             executed_factor_specs = plugin_result.factor_specs
             plugin_artifacts = plugin_result.trace_artifacts
+            if trace_update_callback:
+                trace_update_callback(
+                    {
+                        "executed_factor_specs": executed_factor_specs,
+                        **plugin_artifacts,
+                    }
+                )
             backtest_kwargs = {
                 "factor_data_dict": plugin_result.factor_data_dict,
                 "price_data": plugin_result.price_data,
@@ -144,12 +162,18 @@ def run_resume_workflow(
                 "pipeline_status": "fallback",
                 "pipeline_errors": [str(exc)],
             }
+            if trace_update_callback:
+                trace_update_callback(plugin_artifacts)
     if progress_callback:
         progress_callback("正在执行回测...")
     backtest_result = run_backtest(executed_factor_specs, research_spec, **backtest_kwargs)
+    if trace_update_callback:
+        trace_update_callback({"backtest_result": backtest_result})
     if progress_callback:
         progress_callback("正在生成回测解释...")
     explanation = explain_backtest(backtest_result)
+    if trace_update_callback:
+        trace_update_callback({"explanation": explanation})
 
     partial_trace = {
         "input_text": input_text,

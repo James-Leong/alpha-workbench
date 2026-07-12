@@ -191,6 +191,98 @@ def test_create_project_returns_before_initial_research_finishes(tmp_path, monke
     assert detail.json()["trace"]["idea_spec"]["idea_name"] == "异步研读"
 
 
+def test_running_project_persists_factor_stage_outputs(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    import alpha_workbench.api.routers.research as research_router
+
+    stage_written = Event()
+    finish_workflow = Event()
+    idea_spec = {
+        "idea_name": "阶段性输出",
+        "core_hypothesis": "后台运行时也应展示候选因子和表达式校验。",
+    }
+    factor_specs = [
+        {
+            "factor_id": "earnings_surprise_gap",
+            "factor_name": "盈利超预期缺口",
+            "plain_description": "盈利超预期且公告前涨幅有限。",
+            "formula_tree": {"op": "sub", "args": ["quarter_net_profit", "expected_net_profit"]},
+        }
+    ]
+    compiled_factors = [
+        {
+            "factor_id": "earnings_surprise_gap",
+            "factor_name": "盈利超预期缺口",
+            "status": "compiled",
+            "expression_tree_valid": True,
+        }
+    ]
+
+    def fake_run_resume_workflow(**kwargs):
+        kwargs["trace_update_callback"]({"factor_specs": factor_specs})
+        kwargs["trace_update_callback"]({"compiled_factors": compiled_factors})
+        stage_written.set()
+        finish_workflow.wait(timeout=2)
+        return {
+            "input_text": "test",
+            "workflow_mode": "demo_workflow",
+            "is_mock": True,
+            "idea_spec": idea_spec,
+            "research_spec": kwargs["research_spec"],
+            "factor_specs": factor_specs,
+            "compiled_factors": compiled_factors,
+            "backtest_result": {"metrics": {"ic_mean": 0.01}},
+            "explanation": {},
+            "audit_report": {"checks": []},
+            "report_markdown": "# report",
+        }
+
+    monkeypatch.setattr(research_router, "extract_idea", lambda text, source_meta=None: idea_spec)
+    monkeypatch.setattr(research_router, "run_resume_workflow", fake_run_resume_workflow)
+
+    register = client.post(
+        "/api/auth/register",
+        json={
+            "email": "stages@example.com",
+            "username": "stageuser",
+            "password": "strong-password",
+        },
+    )
+    csrf = register.json()["csrf_token"]
+
+    created = client.post(
+        "/api/research/projects",
+        headers={"X-CSRF-Token": csrf},
+        json={"title": "阶段性输出", "input_text": "test input"},
+    )
+    project_id = created.json()["id"]
+    for _ in range(20):
+        detail = client.get(f"/api/research/projects/{project_id}")
+        if detail.json()["trace"].get("research_spec"):
+            break
+        time.sleep(0.05)
+
+    started = client.post(
+        f"/api/research/projects/{project_id}/start",
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert started.status_code == 200
+
+    assert stage_written.wait(timeout=2)
+    running_detail = client.get(f"/api/research/projects/{project_id}").json()
+    assert running_detail["status"] == "running"
+    assert running_detail["trace"]["factor_specs"] == factor_specs
+    assert running_detail["trace"]["compiled_factors"] == compiled_factors
+
+    finish_workflow.set()
+    for _ in range(20):
+        completed = client.get(f"/api/research/projects/{project_id}").json()
+        if completed["status"] == "completed":
+            break
+        time.sleep(0.05)
+    assert completed["status"] == "completed"
+
+
 def test_update_spec_rejected_after_start(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     import alpha_workbench.api.routers.research as research_router
