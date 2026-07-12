@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
+from datetime import datetime
 from threading import Thread
 import time
+import traceback
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -24,6 +27,7 @@ from alpha_workbench.api.schemas import (
     ResearchSpecUpdate,
 )
 from alpha_workbench.agents.idea_extractor import extract_idea
+from alpha_workbench.core.config import settings as core_settings
 from alpha_workbench.memory.research_trace import _safe_json_default
 from alpha_workbench.workflows.demo_workflow import build_research_spec, run_resume_workflow, _parse_holding_period
 
@@ -76,6 +80,7 @@ def _update_research_spec(trace: dict[str, Any], update: ResearchSpecUpdate) -> 
 
 
 router = APIRouter(prefix="/api/research", tags=["research"])
+logger = logging.getLogger(__name__)
 
 
 INITIAL_PROGRESS = [
@@ -96,6 +101,101 @@ def _json_safe(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, default=_safe_json_default))
 
 
+def _run_log_path(run_id: int) -> str:
+    log_dir = core_settings.data_dir / "logs" / "research_runs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return str(log_dir / f"run_{run_id}.jsonl")
+
+
+def _append_run_log(
+    run_id: int,
+    event: str,
+    *,
+    project_id: int | None = None,
+    stage: str = "",
+    message: str = "",
+    extra: dict[str, Any] | None = None,
+    exc: BaseException | None = None,
+) -> str:
+    path = _run_log_path(run_id)
+    payload: dict[str, Any] = {
+        "time": utcnow().isoformat(timespec="seconds"),
+        "event": event,
+        "stage": stage,
+        "project_id": project_id,
+        "run_id": run_id,
+        "message": message[:4000],
+    }
+    if extra:
+        payload["extra"] = _json_safe(extra)
+    if exc is not None:
+        payload["error_type"] = type(exc).__name__
+        payload["traceback_tail"] = "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        )[-8000:]
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(_json_safe(payload), ensure_ascii=False) + "\n")
+    return path
+
+
+def _diagnostic_payload(
+    *,
+    stage: str,
+    project: ResearchProject | None,
+    run: ResearchRun | None,
+    message: str,
+    exc: BaseException | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "stage": stage,
+        "message": message[:4000],
+        "time": utcnow().isoformat(timespec="seconds"),
+        "project_id": project.id if project is not None else None,
+        "run_id": run.id if run is not None else None,
+        "project_status": project.status if project is not None else None,
+        "run_status": run.status if run is not None else None,
+        "current_step": run.current_step if run is not None else "",
+    }
+    if exc is not None:
+        payload["error_type"] = type(exc).__name__
+        payload["traceback_tail"] = "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        )[-8000:]
+    if extra:
+        payload["extra"] = _json_safe(extra)
+    return payload
+
+
+def _append_trace_diagnostic(
+    db: Session,
+    trace_record: ResearchTrace | None,
+    diagnostic: dict[str, Any],
+) -> None:
+    if trace_record is None:
+        return
+    trace_json = dict(trace_record.trace_json or {})
+    diagnostics = [dict(item) for item in trace_json.get("workflow_diagnostics", [])]
+    diagnostics.append(_json_safe(diagnostic))
+    trace_json["workflow_diagnostics"] = diagnostics[-20:]
+    trace_record.trace_json = _json_safe(trace_json)
+    db.add(trace_record)
+
+
+def _attach_run_log_path(
+    db: Session,
+    trace_record: ResearchTrace | None,
+    run_id: int,
+) -> str:
+    path = _run_log_path(run_id)
+    if trace_record is not None:
+        trace_json = dict(trace_record.trace_json or {})
+        trace_json["run_log_path"] = path
+        trace_record.trace_json = _json_safe(trace_json)
+        db.add(trace_record)
+    return path
+
+
 def _summary_from_trace(trace: dict[str, Any]) -> str:
     idea = trace.get("idea_spec") or {}
     if isinstance(idea, dict):
@@ -108,6 +208,83 @@ def _summary_from_trace(trace: dict[str, Any]) -> str:
         if hypothesis:
             return str(hypothesis)[:400]
     return "研究流程已完成。"
+
+
+def _contains_cjk(text: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in text)
+
+
+def _display_safe_trace(trace: dict[str, Any]) -> dict[str, Any]:
+    """Normalize old trace payloads for the UI without mutating stored data."""
+
+    safe_trace = _json_safe(trace)
+    code_agent = safe_trace.get("code_agent")
+    if isinstance(code_agent, dict):
+        summary = str(code_agent.get("summary") or "").strip()
+        if summary and not _contains_cjk(summary):
+            code_agent["summary"] = (
+                "已生成 AlphaWorkbench 因子插件，并完成 manifest、AST、pytest、"
+                "沙箱 smoke 和未来函数扰动审计。"
+            )
+        risks = code_agent.get("risks")
+        if isinstance(risks, list):
+            code_agent["risks"] = _display_safe_risks(risks)
+
+    backtest_result = safe_trace.get("backtest_result")
+    if isinstance(backtest_result, dict):
+        mercury_status = backtest_result.get("mercury_status")
+        if isinstance(mercury_status, dict):
+            notes = mercury_status.get("notes")
+            if isinstance(notes, list):
+                mercury_status["notes"] = [_display_safe_mercury_note(note) for note in notes]
+            attempts = mercury_status.get("attempts")
+            if isinstance(attempts, dict):
+                for attempt in attempts.values():
+                    if isinstance(attempt, dict) and "message" in attempt:
+                        attempt["message"] = _display_safe_mercury_note(attempt["message"])
+    return safe_trace
+
+
+def _display_safe_risks(risks: list[Any]) -> list[str]:
+    localized: list[str] = []
+    for item in risks:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        if _contains_cjk(text):
+            localized.append(text)
+            continue
+        lower = text.lower()
+        if any(token in lower for token in ["open", "high", "low", "close", "ohlc"]):
+            localized.append(
+                "当前因子在缺少完整 OHLC 字段时会使用收盘价路径代理，接入真实行情字段后需要复核上下影线口径。"
+            )
+        elif any(token in lower for token in ["fundamental", "announcement", "technical signal"]):
+            localized.append(
+                "当前生成逻辑与研究主题中的基本面字段和公告时点存在口径差异，需要在真实数据接入时确认字段契约。"
+            )
+        elif "test" in lower and any(token in lower for token in ["not executed", "not run"]):
+            localized.append(
+                "Codex 自述测试执行不完整；平台已重新执行生成 pytest、沙箱 smoke 和未来函数扰动审计。"
+            )
+        else:
+            localized.append("生成插件仍需结合真实字段、样本窗口和交易级回测表现复核。")
+    return list(dict.fromkeys(localized))
+
+
+def _display_safe_mercury_note(note: Any) -> str:
+    text = str(note or "").strip()
+    if not text or _contains_cjk(text):
+        return text
+    if text.startswith("Mercury returned no result for "):
+        factor_id = text.removeprefix("Mercury returned no result for ").split(";")[0].strip()
+        return f"Mercury 未返回 {factor_id} 的交易级结果，已回退到本地因子分析。"
+    if text.startswith("Mercury failed for "):
+        detail = text.removeprefix("Mercury failed for ").replace("; used local fallback.", "")
+        return f"Mercury 调用失败：{detail}；已回退到本地因子分析。"
+    if text.startswith("Mercury service unavailable"):
+        return "Mercury 服务不可用，已回退到本地因子分析。"
+    return "Mercury 未返回可展示的交易级结果，已回退到本地因子分析。"
 
 
 def _metrics_from_trace(trace: dict[str, Any]) -> dict[str, Any]:
@@ -139,6 +316,8 @@ def _normalize_progress_events(
         for event in normalized:
             if event.get("status") == "running":
                 event["status"] = "completed"
+            if event.get("status") == "completed":
+                _rewrite_completed_progress_event(event)
     elif project_status == "failed":
         for event in normalized:
             if event.get("status") == "running":
@@ -146,8 +325,35 @@ def _normalize_progress_events(
     return normalized
 
 
+def _rewrite_completed_progress_event(event: dict[str, Any]) -> None:
+    """Replace stale in-progress wording for already completed projects."""
+
+    completed_text = {
+        "研究执行": ("研究执行", "已进入研究执行流程。"),
+        "正在生成候选因子": ("已生成候选因子", "候选因子已生成。"),
+        "正在编译因子表达式": ("已编译因子表达式", "因子表达式已完成校验。"),
+        "正在调用 Codex 生成并验证因子插件": (
+            "已生成并验证 Codex 因子插件",
+            "Codex 因子插件已生成，并完成沙箱验证。",
+        ),
+        "正在执行回测": ("已执行回测", "回测已完成。"),
+        "正在生成回测解释": ("已生成回测解释", "回测解释已生成。"),
+        "正在生成研究报告": ("已生成研究报告", "研究报告已生成。"),
+        "完成": ("完成", "研究结果已生成。"),
+    }
+    step = str(event.get("step") or "")
+    if step in completed_text:
+        event["step"], event["message"] = completed_text[step]
+        return
+
+    message = str(event.get("message") or "")
+    if message.startswith("正在"):
+        event["message"] = message.replace("正在", "已", 1).rstrip(".。") + "。"
+
+
 def _project_summary(db: Session, project: ResearchProject) -> ResearchProjectSummary:
     latest = _latest_run(db, project.id or 0, project.user_id)
+    latest = _maybe_finish_stale_codex_run(db, project, latest)
     return ResearchProjectSummary(
         id=project.id or 0,
         title=project.title,
@@ -180,6 +386,10 @@ def _append_progress(db: Session, run: ResearchRun, step: str, message: str) -> 
     )
     run.current_step = step
     run.progress_events = events
+    project = db.get(ResearchProject, run.project_id)
+    if project is not None:
+        project.updated_at = utcnow()
+        db.add(project)
     db.add(run)
     db.commit()
     db.refresh(run)
@@ -202,6 +412,93 @@ def _finish_progress(db: Session, run: ResearchRun, status_value: str, message: 
     run.progress_events = events
 
 
+def _event_datetime(event: dict[str, Any]) -> datetime | None:
+    raw_time = event.get("time")
+    if not raw_time:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw_time))
+    except ValueError:
+        return None
+
+
+def _stale_codex_timeout_seconds() -> int:
+    return max(int(core_settings.factor_code_timeout_seconds) + 60, 900)
+
+
+def _maybe_finish_stale_codex_run(
+    db: Session,
+    project: ResearchProject,
+    run: ResearchRun | None,
+) -> ResearchRun | None:
+    """Fail a Codex step that outlived its worker thread/process.
+
+    The demo API uses in-process background threads. During development, uvicorn
+    reloads or interrupted Codex subprocesses can leave a run marked as running
+    even though there is no worker left to update it. Keep the UI from spinning
+    forever by treating an old Codex progress event as a timed-out run.
+    """
+
+    if (
+        run is None
+        or project.status != "running"
+        or run.status != "running"
+        or "Codex" not in str(run.current_step)
+    ):
+        return run
+
+    running_events = [
+        dict(event)
+        for event in (run.progress_events or [])
+        if event.get("status") == "running" and "Codex" in str(event.get("step", ""))
+    ]
+    if not running_events:
+        return run
+    started_at = _event_datetime(running_events[-1])
+    if started_at is None:
+        return run
+    if (utcnow() - started_at).total_seconds() <= _stale_codex_timeout_seconds():
+        return run
+
+    message = (
+        "Codex 因子插件生成超过超时阈值，后台 worker 已无进度更新；"
+        "请重新启动研究或切换为表达式模式。"
+    )
+    trace_record = db.exec(select(ResearchTrace).where(ResearchTrace.run_id == run.id)).first()
+    log_path = _append_run_log(
+        run.id or 0,
+        "stale_codex_run",
+        project_id=project.id,
+        stage="stale_codex_run",
+        message=message,
+        extra={"timeout_seconds": _stale_codex_timeout_seconds()},
+    )
+    _attach_run_log_path(db, trace_record, run.id or 0)
+    _append_trace_diagnostic(
+        db,
+        trace_record,
+        _diagnostic_payload(
+            stage="stale_codex_run",
+            project=project,
+            run=run,
+            message=message,
+            extra={"timeout_seconds": _stale_codex_timeout_seconds()},
+        ),
+    )
+    run.status = "failed"
+    run.error = message
+    _finish_progress(db, run, "failed", message)
+    project.status = "failed"
+    project.summary = f"{message} 运行日志：{log_path}"
+    project.updated_at = utcnow()
+    db.add(project)
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    db.refresh(project)
+    return run
+
+
 def _run_initial_research(
     project_id: int,
     run_id: int,
@@ -217,6 +514,15 @@ def _run_initial_research(
         trace_record = db.exec(select(ResearchTrace).where(ResearchTrace.run_id == run_id)).first()
         if project is None or run is None or trace_record is None or project.user_id != user_id:
             return
+        log_path = _attach_run_log_path(db, trace_record, run_id)
+        _append_run_log(
+            run_id,
+            "thread_start",
+            project_id=project_id,
+            stage="initial_research",
+            message="Initial research worker started.",
+            extra={"log_path": log_path},
+        )
 
         try:
             idea_spec = extract_idea(idea_input, source_meta)
@@ -248,7 +554,34 @@ def _run_initial_research(
             db.add(run)
             db.add(trace_record)
             db.commit()
+            _append_run_log(
+                run_id,
+                "thread_success",
+                project_id=project_id,
+                stage="initial_research",
+                message="Initial research completed.",
+            )
         except Exception as exc:
+            logger.exception("initial research failed for project_id=%s run_id=%s", project_id, run_id)
+            _append_run_log(
+                run_id,
+                "thread_error",
+                project_id=project_id,
+                stage="initial_research",
+                message=str(exc),
+                exc=exc,
+            )
+            _append_trace_diagnostic(
+                db,
+                trace_record,
+                _diagnostic_payload(
+                    stage="initial_research",
+                    project=project,
+                    run=run,
+                    message=str(exc),
+                    exc=exc,
+                ),
+            )
             run.status = "failed"
             run.error = str(exc)
             run.current_step = "智能研读失败"
@@ -279,13 +612,38 @@ def _run_resume_workflow(project_id: int, run_id: int, user_id: int) -> None:
         if project is None or run is None or trace_record is None:
             return
         start = time.perf_counter()
+        log_path = _attach_run_log_path(db, trace_record, run_id)
+        _append_run_log(
+            run_id,
+            "thread_start",
+            project_id=project_id,
+            stage="resume_workflow",
+            message="Resume workflow worker started.",
+            extra={"log_path": log_path},
+        )
 
         def progress_callback(message: str) -> None:
+            _append_run_log(
+                run_id,
+                "progress",
+                project_id=project_id,
+                stage=message.replace("...", "").replace("。", ""),
+                message=message,
+            )
             _append_progress(db, run, message.replace("...", "").replace("。", ""), message)
 
         def trace_update_callback(updates: dict[str, Any]) -> None:
+            _append_run_log(
+                run_id,
+                "trace_update",
+                project_id=project_id,
+                stage="resume_workflow",
+                message="Trace updated during workflow execution.",
+                extra={"keys": sorted(updates.keys())},
+            )
             current_trace = dict(trace_record.trace_json or {})
             current_trace.update(updates)
+            current_trace["run_log_path"] = log_path
             trace_record.trace_json = _json_safe(current_trace)
             project.updated_at = utcnow()
             db.add(project)
@@ -307,6 +665,33 @@ def _run_resume_workflow(project_id: int, run_id: int, user_id: int) -> None:
                 trace_update_callback=trace_update_callback,
             )
             safe_trace = _json_safe(trace)
+            if safe_trace.get("pipeline_status") == "fallback":
+                _append_run_log(
+                    run_id,
+                    "fallback",
+                    project_id=project_id,
+                    stage="factor_plugin_fallback",
+                    message="Codex factor plugin pipeline fell back to expression mode.",
+                    extra={"pipeline_errors": safe_trace.get("pipeline_errors", [])},
+                )
+                diagnostics = [
+                    dict(item) for item in safe_trace.get("workflow_diagnostics", [])
+                ]
+                diagnostics.append(
+                    _diagnostic_payload(
+                        stage="factor_plugin_fallback",
+                        project=project,
+                        run=run,
+                        message="Codex factor plugin pipeline fell back to expression mode.",
+                        extra={
+                            "pipeline_errors": safe_trace.get("pipeline_errors", []),
+                            "factor_implementation_mode": safe_trace.get(
+                                "factor_implementation_mode"
+                            ),
+                        },
+                    )
+                )
+                safe_trace["workflow_diagnostics"] = diagnostics[-20:]
             report = str(safe_trace.get("report_markdown") or "")
             metrics = _metrics_from_trace(safe_trace)
             run.status = "completed"
@@ -324,7 +709,35 @@ def _run_resume_workflow(project_id: int, run_id: int, user_id: int) -> None:
             db.add(run)
             db.add(trace_record)
             db.commit()
+            _append_run_log(
+                run_id,
+                "thread_success",
+                project_id=project_id,
+                stage="resume_workflow",
+                message="Resume workflow completed.",
+                extra={"duration_ms": run.duration_ms},
+            )
         except Exception as exc:
+            logger.exception("resume workflow failed for project_id=%s run_id=%s", project_id, run_id)
+            _append_run_log(
+                run_id,
+                "thread_error",
+                project_id=project_id,
+                stage="resume_workflow",
+                message=str(exc),
+                exc=exc,
+            )
+            _append_trace_diagnostic(
+                db,
+                trace_record,
+                _diagnostic_payload(
+                    stage="resume_workflow",
+                    project=project,
+                    run=run,
+                    message=str(exc),
+                    exc=exc,
+                ),
+            )
             run.status = "failed"
             run.error = str(exc)
             run.duration_ms = int((time.perf_counter() - start) * 1000)
@@ -480,6 +893,7 @@ def get_project_progress(
     if project is None or project.user_id != user.id:
         raise HTTPException(status_code=404, detail="Research project not found")
     latest = _latest_run(db, project.id or 0, user.id or 0)
+    latest = _maybe_finish_stale_codex_run(db, project, latest)
     return ResearchRunProgress(
         project_id=project.id or 0,
         run_id=latest.id if latest else None,
@@ -510,7 +924,7 @@ def get_project(
         **summary.model_dump(),
         report_markdown=trace_record.report_markdown if trace_record else "",
         metrics_summary=trace_record.metrics_summary if trace_record else {},
-        trace=trace_record.trace_json if trace_record else {},
+        trace=_display_safe_trace(trace_record.trace_json if trace_record else {}),
     )
 
 

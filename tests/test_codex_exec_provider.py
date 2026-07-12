@@ -21,12 +21,14 @@ class FakeRunner:
         exec_returncode=0,
         output=None,
         timeout=False,
+        timeout_after_files=False,
         generated_files=("manifest.json", "factor.py", "test_factor.py"),
     ):
         self.commands = []
         self.exec_returncode = exec_returncode
         self.output = output
         self.timeout = timeout
+        self.timeout_after_files = timeout_after_files
         self.generated_files = generated_files
 
     def __call__(self, command, **kwargs):
@@ -36,7 +38,7 @@ class FakeRunner:
         if command[1:] == ["--version"]:
             return subprocess.CompletedProcess(command, 0, stdout="codex-cli 1.2.3\n", stderr="")
 
-        if self.timeout:
+        if self.timeout and not self.timeout_after_files:
             raise subprocess.TimeoutExpired(command, kwargs["timeout"])
 
         if self.output is not None:
@@ -46,6 +48,9 @@ class FakeRunner:
         job_dir = Path(command[command.index("-C") + 1])
         for name in self.generated_files:
             (job_dir / name).write_text(name, encoding="utf-8")
+
+        if self.timeout:
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
 
         return subprocess.CompletedProcess(
             command,
@@ -178,8 +183,10 @@ def test_repair_does_not_accept_stale_last_message(tmp_path):
     generated = provider.generate("build a factor", tmp_path)
     runner.output = None
 
-    with pytest.raises(CodexOutputError, match="no final JSON"):
-        provider.repair("build a factor", generated.job_dir, "validation failed")
+    result = provider.repair("build a factor", generated.job_dir, "validation failed")
+
+    assert result.job_dir == generated.job_dir
+    assert "did not return a valid final JSON" in result.summary
 
 
 def test_cleanup_removes_only_owned_job_directory(tmp_path):
@@ -217,6 +224,19 @@ def test_generate_reports_timeout_without_calling_real_codex(tmp_path):
     with pytest.raises(CodexExecutionTimeoutError, match="timed out"):
         provider.generate("build a factor", tmp_path)
     assert not list(tmp_path.glob("codex-job-*"))
+
+
+def test_generate_salvages_required_files_after_timeout(tmp_path):
+    provider = make_provider(
+        FakeRunner(timeout=True, timeout_after_files=True),
+        timeout_seconds=0.5,
+    )
+
+    result = provider.generate("build a factor", tmp_path)
+
+    assert result.files == ["manifest.json", "factor.py", "test_factor.py"]
+    assert "did not return a final JSON" in result.summary
+    assert result.job_dir.exists()
 
 
 def test_generate_reports_nonzero_exit(tmp_path):

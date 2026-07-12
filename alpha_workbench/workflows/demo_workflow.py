@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import traceback
 from typing import Any
 
 from alpha_workbench.agents.audit_agent import run_audit
@@ -156,11 +157,20 @@ def run_resume_workflow(
         except Exception as exc:
             if not execution_config.get("fallback_to_expression", True):
                 raise
+            error_detail = {
+                "stage": "factor_plugin_pipeline",
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+                "traceback_tail": "".join(
+                    traceback.format_exception(type(exc), exc, exc.__traceback__)
+                )[-8000:],
+            }
             plugin_artifacts = {
                 "factor_implementation_mode": "expression_tree_fallback",
                 "code_agent": {"provider": "codex_exec", "is_mock": False},
                 "pipeline_status": "fallback",
                 "pipeline_errors": [str(exc)],
+                "pipeline_error_details": [error_detail],
             }
             if trace_update_callback:
                 trace_update_callback(plugin_artifacts)

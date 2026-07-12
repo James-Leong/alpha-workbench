@@ -45,6 +45,73 @@ class FactorPluginPipelineResult:
     trace_artifacts: dict[str, Any]
 
 
+def _runtime_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
+    """Convert manifest parameters into values passed to calculate().
+
+    Codex sometimes emits JSON-schema-style parameter metadata even though the
+    runtime expects concrete defaults. Accept that common shape but reject
+    ambiguous metadata so generated plugins fail with a useful validation error.
+    """
+
+    runtime: dict[str, Any] = {}
+    for name, value in parameters.items():
+        if isinstance(value, Mapping) and (
+            "type" in value or "default" in value or "minimum" in value
+        ):
+            if "default" not in value:
+                raise FactorPluginPipelineError(
+                    "generated manifest parameter metadata must include a default value: "
+                    f"{name}"
+                )
+            runtime[name] = value["default"]
+        else:
+            runtime[name] = value
+    return runtime
+
+
+def _contains_cjk(text: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in text)
+
+
+def _localized_code_agent_summary(summary: object) -> str:
+    text = str(summary or "").strip()
+    if text and _contains_cjk(text):
+        return text
+    return "已生成 AlphaWorkbench 因子插件，并完成 manifest、AST、pytest、沙箱 smoke 和未来函数扰动审计。"
+
+
+def _localized_code_agent_risks(risks: object) -> list[str]:
+    source = list(risks) if isinstance(risks, list) else []
+    localized: list[str] = []
+    for item in source:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        if _contains_cjk(text):
+            localized.append(text)
+            continue
+        lower = text.lower()
+        if any(token in lower for token in ["open", "high", "low", "close", "ohlc"]):
+            localized.append(
+                "当前因子在缺少完整 OHLC 字段时会使用收盘价路径代理，接入真实行情字段后需要复核上下影线口径。"
+            )
+        elif any(token in lower for token in ["fundamental", "announcement", "technical signal"]):
+            localized.append(
+                "当前生成逻辑与研究主题中的基本面字段和公告时点存在口径差异，需要在真实数据接入时确认字段契约。"
+            )
+        elif "test" in lower and any(token in lower for token in ["not executed", "not run"]):
+            localized.append(
+                "Codex 自述测试执行不完整；平台已重新执行生成 pytest、沙箱 smoke 和未来函数扰动审计。"
+            )
+        elif "point" in lower or "future" in lower or "lookahead" in lower:
+            localized.append(
+                "需持续关注点时序对齐和未来函数风险，平台已保留扰动审计结果供复核。"
+            )
+        else:
+            localized.append("Codex 返回了英文风险说明，已转为待复核项：生成插件仍需结合真实字段和样本表现复核。")
+    return list(dict.fromkeys(localized))
+
+
 def build_factor_coding_brief(
     factor_spec: Mapping[str, Any],
     idea_spec: Mapping[str, Any],
@@ -81,6 +148,11 @@ def build_factor_coding_brief(
             "entrypoint": "factor:calculate",
             "return_shape": "wide_dataframe",
             "context_api": ["field(name)", "trading_dates", "symbols"],
+            "parameters_contract": (
+                "manifest.parameters must contain runtime default values, not JSON Schema "
+                "metadata; for example use {'window': 20}, not "
+                "{'window': {'type': 'integer', 'default': 20}}"
+            ),
             "forbidden": [
                 "uqer",
                 "network",
@@ -115,6 +187,7 @@ def run_factor_plugin_pipeline(
     if not factor_specs:
         raise FactorPluginPipelineError("at least one candidate factor is required")
     selected = dict(factor_specs[0])
+    selected_display_name = str(selected.get("factor_name") or "").strip()
     brief = build_factor_coding_brief(selected, idea_spec)
     code_agent = provider or CodexExecProvider(
         timeout_seconds=settings.factor_code_timeout_seconds
@@ -163,6 +236,7 @@ def run_factor_plugin_pipeline(
                 raise FactorPluginPipelineError(
                     "generated manifest violates the coding brief PIT/frequency data policy"
                 )
+            runtime_params = _runtime_parameters(manifest.parameters)
             if run_generated_tests:
                 _run_generated_plugin_tests(plugin_dir)
                 validation_checks.append({"name": "generated_pytest", "status": "passed"})
@@ -192,7 +266,7 @@ def run_factor_plugin_pipeline(
             factor_data = executor.run(
                 plugin_dir,
                 context,
-                manifest.parameters,
+                runtime_params,
                 lookback_days=manifest.lookback_days,
             )
             validation_checks.append({"name": "fixture_smoke", "status": "passed"})
@@ -206,7 +280,7 @@ def run_factor_plugin_pipeline(
                 context,
                 factor_data,
                 manifest.required_fields,
-                params=manifest.parameters,
+                params=runtime_params,
             )
             validation_checks.append(lookahead_report)
             attempt_reports.append({"attempt": attempt, "status": "passed"})
@@ -253,7 +327,7 @@ def run_factor_plugin_pipeline(
     selected.update(
         {
             "factor_id": manifest.factor_id,
-            "factor_name": manifest.factor_name,
+            "factor_name": selected_display_name or manifest.factor_name,
             "required_fields": manifest.required_fields,
             "implementation_target": "python_plugin",
             "is_mock": False,
@@ -272,13 +346,19 @@ def run_factor_plugin_pipeline(
         "code_agent": {
             "provider": str(generation.provider),
             "version": str(generation.version),
-            "summary": str(generation.summary),
-            "risks": list(generation.risks),
+            "summary": _localized_code_agent_summary(generation.summary),
+            "risks": _localized_code_agent_risks(generation.risks),
             "is_mock": bool(generation.is_mock),
         },
         "factor_coding_briefs": [brief.model_dump(mode="json")],
         "factor_plugin_manifests": [manifest.model_dump(mode="json")],
         "codegen_validation_reports": [validation_report],
+        "factor_runtime_parameters": [
+            {
+                "factor_id": manifest.factor_id,
+                "parameters": runtime_params,
+            }
+        ],
         "plugin_registry": promoted.trace_dict(),
         "factor_data_manifests": [factor_manifest],
         "factor_plugin_sources": [

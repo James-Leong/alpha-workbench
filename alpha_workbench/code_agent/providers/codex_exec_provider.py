@@ -230,6 +230,19 @@ class CodexExecProvider:
                     timeout=self.timeout_seconds,
                 )
         except subprocess.TimeoutExpired as exc:
+            salvaged = self._result_from_generated_files(
+                job_dir,
+                summary=(
+                    "Codex generated the required plugin files but did not return a "
+                    f"final JSON message before the {self.timeout_seconds:g}s timeout."
+                ),
+                risks=[
+                    "Codex final response was synthesized by AlphaWorkbench because "
+                    "the CLI did not finish cleanly.",
+                ],
+            )
+            if salvaged is not None:
+                return salvaged
             raise CodexExecutionTimeoutError(
                 f"codex exec timed out after {self.timeout_seconds:g} seconds; job: {job_dir}"
             ) from exc
@@ -247,12 +260,29 @@ class CodexExecProvider:
         ):
             raise CodexOutputError(f"codex output path is not a regular job file: {output_path}")
         self._validate_job_sizes(job_dir, output_path)
-        message = self._parse_output(output_path, completed.stdout)
         files = [name for name in _GENERATED_FILES if self._is_regular_job_file(job_dir, name)]
         missing_files = [name for name in _GENERATED_FILES if name not in files]
         if missing_files:
             raise CodexOutputError(
                 f"codex did not generate required files: {', '.join(missing_files)}; job: {job_dir}"
+            )
+        try:
+            message = self._parse_output(output_path, completed.stdout)
+        except CodexOutputError:
+            if output_path.is_file() or (completed.stdout or "").strip():
+                raise
+            return CodeAgentResult(
+                version=self.version,
+                job_dir=job_dir,
+                files=files,
+                summary=(
+                    "Codex generated the required plugin files but did not return a "
+                    "valid final JSON message."
+                ),
+                risks=[
+                    "Codex final response was synthesized by AlphaWorkbench because "
+                    "the CLI output was missing or invalid.",
+                ],
             )
         return CodeAgentResult(
             version=self.version,
@@ -260,6 +290,29 @@ class CodexExecProvider:
             files=files,
             summary=message.summary,
             risks=message.risks,
+        )
+
+    def _result_from_generated_files(
+        self,
+        job_dir: Path,
+        *,
+        summary: str,
+        risks: list[str],
+    ) -> CodeAgentResult | None:
+        output_path = job_dir / _LAST_MESSAGE_FILE
+        try:
+            self._validate_job_sizes(job_dir, output_path)
+        except CodexOutputError:
+            return None
+        files = [name for name in _GENERATED_FILES if self._is_regular_job_file(job_dir, name)]
+        if len(files) != len(_GENERATED_FILES):
+            return None
+        return CodeAgentResult(
+            version=self.version,
+            job_dir=job_dir,
+            files=files,
+            summary=summary,
+            risks=risks,
         )
 
     @staticmethod
@@ -592,7 +645,11 @@ Non-negotiable security and file constraints:
   "factor:calculate"), required_fields (unique string array), lookback_days (non-negative integer),
   frequency (string, use "daily"), point_in_time (boolean), parameters (object), data_policy
   (object), risk_notes (string array), status (string, use "generated").
+- manifest.parameters must contain concrete runtime default values, not JSON Schema metadata.
+  Example: use {{"window": 20, "min_periods": 20}}, not
+  {{"window": {{"type": "integer", "default": 20}}}}.
 - After writing the files, respond only with JSON containing a non-empty summary string and a risks array of strings.
+  The summary and every risk item must be written in Simplified Chinese for the research UI.
 
 Factor Coding Brief:
 <brief>

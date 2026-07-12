@@ -80,6 +80,22 @@ function textValue(value: unknown, fallback = "暂无内容") {
   return JSON.stringify(value, null, 2);
 }
 
+function labelForKey(key: string) {
+  const labels: Record<string, string> = {
+    provider: "提供方",
+    version: "版本",
+    summary: "说明",
+    risks: "风险提示",
+    is_mock: "是否模拟",
+    enabled: "已启用",
+    base_url: "服务地址",
+    attempted: "已尝试调用",
+    success_count: "成功数量",
+    attempt_count: "尝试次数",
+  };
+  return labels[key] ?? key;
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -149,8 +165,16 @@ function KeyValueList({ data }: { data: Record<string, unknown> }) {
     <dl className="kv-list">
       {entries.slice(0, 8).map(([key, value]) => (
         <div key={key}>
-          <dt>{key}</dt>
-          <dd>{textValue(value)}</dd>
+          <dt>{labelForKey(key)}</dt>
+          <dd>
+            {Array.isArray(value) ? (
+              <BulletList items={value} />
+            ) : value && typeof value === "object" ? (
+              <JsonBlock value={value} />
+            ) : (
+              textValue(value)
+            )}
+          </dd>
         </div>
       ))}
     </dl>
