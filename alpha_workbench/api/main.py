@@ -8,10 +8,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
-from alpha_workbench.api.config import settings
 from alpha_workbench.api.db import init_db
 from alpha_workbench.api.routers import auth, research
 from alpha_workbench.api.schemas import HealthResponse
+from alpha_workbench.core.config import settings
+from alpha_workbench.core.logging import configure_logging
+
+
+configure_logging()
 
 
 def create_app() -> FastAPI:

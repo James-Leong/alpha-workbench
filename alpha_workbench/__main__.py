@@ -5,8 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 
+from alpha_workbench.core.logging import configure_logging
 from alpha_workbench.memory.research_trace import _safe_json_default
 from alpha_workbench.workflows.demo_workflow import DEFAULT_INPUT, run_demo_workflow
+
+
+configure_logging()
 
 
 def main() -> None:

@@ -565,9 +565,9 @@ class HybridBacktestEngine:
                 factor_spec,
                 backtest_period=backtest_period
             )
-            print("  ✓ LLM解释生成完成")
-            print(f"    is_fallback: {explanation_result.is_fallback}")
-            print(f"    quality_score: {explanation_result.get_quality_score()}")
+            logger.info("LLM解释生成完成")
+            logger.info("is_fallback: %s", explanation_result.is_fallback)
+            logger.info("quality_score: %s", explanation_result.get_quality_score())
 
             # 添加Mercury信息
             if mercury_summary:
@@ -577,7 +577,7 @@ class HybridBacktestEngine:
             return explanation_result
 
         except Exception as e:
-            print(f"  ✗ LLM解释生成失败: {e}")
+            logger.warning("LLM解释生成失败: %s", e)
             return None
     
     def _format_backtest_period(self, factor_data: pd.DataFrame) -> str:

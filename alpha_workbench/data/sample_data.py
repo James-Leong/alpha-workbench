@@ -2,10 +2,13 @@
 Sample Data Loader for AlphaWorkbench Role 5
 样例数据加载工具
 """
+import logging
 import numpy as np
 import pandas as pd
 from typing import Tuple, Optional, List
 from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_SAMPLE_SECURITIES = [
@@ -208,7 +211,7 @@ def load_sample_backtest_data(
     
     # 确保天数足够
     if n_days < min_days:
-        print(f"  ⚠️  n_days={n_days} 太小，自动调整为 {min_days} 以满足因子计算需求")
+        logger.warning("n_days=%s 太小，自动调整为 %s 以满足因子计算需求", n_days, min_days)
         n_days = min_days
     
     # 生成基础数据（额外生成一些天数用于计算因子）

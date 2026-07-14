@@ -28,6 +28,7 @@ from alpha_workbench.api.schemas import (
 )
 from alpha_workbench.agents.idea_extractor import extract_idea
 from alpha_workbench.core.config import settings as core_settings
+from alpha_workbench.core.logging import get_run_logger
 from alpha_workbench.memory.research_trace import _safe_json_default
 from alpha_workbench.workflows.demo_workflow import build_research_spec, run_resume_workflow, _parse_holding_period
 
@@ -102,7 +103,7 @@ def _json_safe(value: Any) -> Any:
 
 
 def _run_log_path(run_id: int) -> str:
-    log_dir = core_settings.data_dir / "logs" / "research_runs"
+    log_dir = core_settings.base_dir / "runs" / "research_runs"
     log_dir.mkdir(parents=True, exist_ok=True)
     return str(log_dir / f"run_{run_id}.jsonl")
 
@@ -117,15 +118,21 @@ def _append_run_log(
     extra: dict[str, Any] | None = None,
     exc: BaseException | None = None,
 ) -> str:
+    """追加一条结构化事件到研究运行审计日志。
+
+    事件统一通过标准 ``logging`` 写入 ``runs/research_runs/run_{run_id}.jsonl``，
+    不再使用裸文件写入。
+    """
     path = _run_log_path(run_id)
+    run_logger = get_run_logger(run_id)
     payload: dict[str, Any] = {
-        "time": utcnow().isoformat(timespec="seconds"),
         "event": event,
         "stage": stage,
         "project_id": project_id,
         "run_id": run_id,
-        "message": message[:4000],
     }
+    if message:
+        payload["run_message"] = message[:4000]
     if extra:
         payload["extra"] = _json_safe(extra)
     if exc is not None:
@@ -133,8 +140,10 @@ def _append_run_log(
         payload["traceback_tail"] = "".join(
             traceback.format_exception(type(exc), exc, exc.__traceback__)
         )[-8000:]
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(_json_safe(payload), ensure_ascii=False) + "\n")
+    try:
+        run_logger.info(message or event, extra=payload)
+    except Exception:
+        logger.exception("failed to append run log for run_id=%s", run_id)
     return path
 
 
@@ -182,18 +191,9 @@ def _append_trace_diagnostic(
     db.add(trace_record)
 
 
-def _attach_run_log_path(
-    db: Session,
-    trace_record: ResearchTrace | None,
-    run_id: int,
-) -> str:
-    path = _run_log_path(run_id)
-    if trace_record is not None:
-        trace_json = dict(trace_record.trace_json or {})
-        trace_json["run_log_path"] = path
-        trace_record.trace_json = _json_safe(trace_json)
-        db.add(trace_record)
-    return path
+def _ensure_run_log_path(run_id: int) -> str:
+    """返回研究运行审计日志的本地文件路径（仅用于后端排查，不暴露给前端）。"""
+    return _run_log_path(run_id)
 
 
 def _summary_from_trace(trace: dict[str, Any]) -> str:
@@ -473,7 +473,7 @@ def _maybe_finish_stale_codex_run(
         message=message,
         extra={"timeout_seconds": _stale_codex_timeout_seconds()},
     )
-    _attach_run_log_path(db, trace_record, run.id or 0)
+    _ensure_run_log_path(run.id or 0)
     _append_trace_diagnostic(
         db,
         trace_record,
@@ -514,7 +514,7 @@ def _run_initial_research(
         trace_record = db.exec(select(ResearchTrace).where(ResearchTrace.run_id == run_id)).first()
         if project is None or run is None or trace_record is None or project.user_id != user_id:
             return
-        log_path = _attach_run_log_path(db, trace_record, run_id)
+        log_path = _ensure_run_log_path(run_id)
         _append_run_log(
             run_id,
             "thread_start",
@@ -612,7 +612,7 @@ def _run_resume_workflow(project_id: int, run_id: int, user_id: int) -> None:
         if project is None or run is None or trace_record is None:
             return
         start = time.perf_counter()
-        log_path = _attach_run_log_path(db, trace_record, run_id)
+        log_path = _ensure_run_log_path(run_id)
         _append_run_log(
             run_id,
             "thread_start",
@@ -643,7 +643,6 @@ def _run_resume_workflow(project_id: int, run_id: int, user_id: int) -> None:
             )
             current_trace = dict(trace_record.trace_json or {})
             current_trace.update(updates)
-            current_trace["run_log_path"] = log_path
             trace_record.trace_json = _json_safe(current_trace)
             project.updated_at = utcnow()
             db.add(project)

@@ -29,7 +29,7 @@ def test_trace_json_default_serializes_pydantic_models():
 
 def test_demo_workflow_returns_complete_trace(monkeypatch):
     # 测试使用 mock 模式，避免每次运行都调用真实 LLM（慢且不稳定）
-    monkeypatch.setattr(settings, "llm_api_key", "")
+    monkeypatch.setattr(settings.llm, "api_key", "")
 
     trace = run_demo_workflow()
 
@@ -42,7 +42,7 @@ def test_demo_workflow_returns_complete_trace(monkeypatch):
 
 
 def test_run_resume_workflow_uses_provided_research_spec(monkeypatch):
-    monkeypatch.setattr(settings, "llm_api_key", "")
+    monkeypatch.setattr(settings.llm, "api_key", "")
 
     idea_spec = clone_default_idea_spec()
     idea_spec["idea_name"] = "test resume workflow"
@@ -65,7 +65,7 @@ def test_run_resume_workflow_uses_provided_research_spec(monkeypatch):
 
 
 def test_run_resume_workflow_codex_mode_passes_computed_factor_data(monkeypatch):
-    monkeypatch.setattr(settings, "llm_api_key", "")
+    monkeypatch.setattr(settings.llm, "api_key", "")
     fixture = make_earnings_surprise_pit_fixture()
     price = _wide(fixture["price"]).astype(float)
     actual = _wide(fixture["quarter_net_profit"]).astype(float)
@@ -127,7 +127,7 @@ def test_run_resume_workflow_codex_mode_passes_computed_factor_data(monkeypatch)
 
 
 def test_run_resume_workflow_codex_fallback_records_error_details(monkeypatch):
-    monkeypatch.setattr(settings, "llm_api_key", "")
+    monkeypatch.setattr(settings.llm, "api_key", "")
 
     def fail_pipeline(*args, **kwargs):
         raise RuntimeError("codex repair timed out")

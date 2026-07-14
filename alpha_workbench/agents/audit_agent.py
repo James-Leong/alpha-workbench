@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from agno.agent import Agent
@@ -9,6 +10,8 @@ from pydantic import BaseModel, Field
 
 from alpha_workbench.agents.core.model import AlphaModel
 from alpha_workbench.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class AuditCheck(BaseModel):
@@ -133,5 +136,5 @@ def run_audit(trace: dict[str, Any]) -> dict[str, Any]:
         data["is_fallback"] = False
         return data
     except Exception as e:
-        print(f"[AuditAgent] LLM调用失败，使用mock fallback: {e}")
+        logger.warning("AuditAgent LLM调用失败，使用mock fallback: %s", e)
         return mock_run_audit(trace)

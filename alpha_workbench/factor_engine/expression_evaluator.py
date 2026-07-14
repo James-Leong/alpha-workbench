@@ -2,12 +2,15 @@
 Expression Evaluator for AlphaWorkbench
 表达式执行器 - 解析和执行 expression_tree
 """
+import logging
 import numpy as np
 import pandas as pd
 from typing import Dict, Optional, Union, Tuple
 import warnings
 
 from alpha_workbench.schemas.backtest_schemas import ExpressionTree, NodeType, DataField
+
+logger = logging.getLogger(__name__)
 
 
 class ExpressionEvaluator:
@@ -348,7 +351,7 @@ class ExpressionEvaluator:
             self._validate_node(expression)
             return True
         except Exception as e:
-            print(f"Expression validation failed: {e}")
+            logger.warning("Expression validation failed: %s", e)
             return False
     
     def _validate_node(self, node: ExpressionTree) -> None:

@@ -9,9 +9,9 @@ from datetime import timedelta
 from fastapi import Cookie, Depends, Header, HTTPException, Response, status
 from sqlmodel import Session, select
 
-from alpha_workbench.api.config import settings
 from alpha_workbench.api.db import get_db
 from alpha_workbench.api.models import User, UserSession, utcnow
+from alpha_workbench.core.config import settings
 
 
 def _hash_token(token: str) -> str:

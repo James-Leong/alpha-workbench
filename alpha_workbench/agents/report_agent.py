@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from agno.agent import Agent
@@ -9,6 +10,8 @@ from agno.agent import Agent
 from alpha_workbench.agents.core.model import AlphaModel
 from alpha_workbench.core.config import settings
 from alpha_workbench.reports.report_generator import generate_report as generate_template_report
+
+logger = logging.getLogger(__name__)
 
 
 def _get_factor_results(trace: dict[str, Any]) -> list:
@@ -87,5 +90,5 @@ def generate_report(trace: dict[str, Any]) -> str:
         content = response.content if hasattr(response, "content") else str(response)
         return content.strip()
     except Exception as e:
-        print(f"[ReportAgent] LLM调用失败，使用mock fallback: {e}")
+        logger.warning("ReportAgent LLM调用失败，使用mock fallback: %s", e)
         return _mock_generate_report(trace)

@@ -25,6 +25,7 @@ from alpha_workbench.agents.report_agent import generate_report  # noqa: E402
 from alpha_workbench.app.research_config import apply_research_config_edits  # noqa: E402
 from alpha_workbench.app.status import backtest_source_summary  # noqa: E402
 from alpha_workbench.backtest.engine import run_backtest  # noqa: E402
+from alpha_workbench.core.logging import configure_logging  # noqa: E402
 from alpha_workbench.factor_engine.compiler import compile_factors  # noqa: E402
 from alpha_workbench.memory.research_trace import save_research_trace  # noqa: E402
 from alpha_workbench.schemas.specs import build_research_trace  # noqa: E402
@@ -35,6 +36,8 @@ from alpha_workbench.workflows.integration_workflow import (  # noqa: E402
     build_empty_integration_trace,
     build_integration_trace,
 )
+
+configure_logging()
 
 
 PAGE_STYLE = """

@@ -3,8 +3,9 @@ Factor Calculator for AlphaWorkbench
 因子计算器 - 根据 FactorSpec 计算因子值
 """
 import json
+import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Union
 import pandas as pd
 import numpy as np
 
@@ -14,6 +15,8 @@ from alpha_workbench.schemas.backtest_schemas import (
     DataField
 )
 from alpha_workbench.factor_engine.expression_evaluator import ExpressionEvaluator
+
+logger = logging.getLogger(__name__)
 
 
 class FactorCalculator:
@@ -97,15 +100,15 @@ class FactorCalculator:
         results = {}
         for factor_dict in factors_data:
             factor_spec = FactorSpec.from_dict(factor_dict)
-            
-            print(f"Calculating factor: {factor_spec.factor_id} ({factor_spec.factor_name})")
-            
+
+            logger.info("Calculating factor: %s (%s)", factor_spec.factor_id, factor_spec.factor_name)
+
             try:
                 factor_data = self.calculate(factor_spec, raw_data)
                 results[factor_spec.factor_id] = factor_data
-                print(f"  ✓ Success: shape={factor_data.shape}")
+                logger.info("Factor calculation success: factor=%s shape=%s", factor_spec.factor_id, factor_data.shape)
             except Exception as e:
-                print(f"  ✗ Failed: {e}")
+                logger.warning("Factor calculation failed: factor=%s error=%s", factor_spec.factor_id, e)
                 results[factor_spec.factor_id] = None
         
         return results

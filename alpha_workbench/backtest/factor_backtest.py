@@ -11,6 +11,7 @@
 - 结果输出
 """
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, Union, List
@@ -40,6 +41,8 @@ from alpha_workbench.backtest.metrics import (
 )
 from alpha_workbench.backtest.plotter import BacktestPlotter
 from alpha_workbench.backtest.llm_explainer import BacktestExplainer
+
+logger = logging.getLogger(__name__)
 
 
 class FactorBacktest:
@@ -447,15 +450,15 @@ def run_batch_backtest(
     results = []
     errors = []
     
-    print(f"开始批量回测: {len(factor_specs)} 个因子")
-    print(f"股票池: {rs.universe}")
-    print(f"分层数: {n_quantiles}")
-    
+    logger.info("开始批量回测: %s 个因子", len(factor_specs))
+    logger.info("股票池: %s", rs.universe)
+    logger.info("分层数: %s", n_quantiles)
+
     for i, factor_dict in enumerate(factor_specs, 1):
         factor_id = factor_dict.get('factor_id', f'FACTOR_{i:03d}')
         factor_name = factor_dict.get('factor_name', f'Factor {i}')
-        
-        print(f"\n[{i}/{len(factor_specs)}] 回测因子: {factor_id}")
+
+        logger.info("[%s/%s] 回测因子: %s", i, len(factor_specs), factor_id)
         
         try:
             # 创建 FactorSpec
@@ -493,11 +496,16 @@ def run_batch_backtest(
             
             report = backtest.run(input_data)
             results.append(report)
-            print(f"  ✓ 回测成功: IC={report.metrics.ic_metrics.ic_mean:.4f}, Sharpe={report.metrics.long_short_metrics.sharpe_ratio:.4f}")
-            
+            logger.info(
+                "回测成功: factor=%s IC=%.4f Sharpe=%.4f",
+                factor_id,
+                report.metrics.ic_metrics.ic_mean,
+                report.metrics.long_short_metrics.sharpe_ratio,
+            )
+
         except Exception as e:
             error_msg = f"因子 {factor_id} 回测失败: {str(e)}"
-            print(f"  ✗ {error_msg}")
+            logger.warning("回测失败: %s", error_msg)
             errors.append({
                 'factor_id': factor_id,
                 'error': str(e)
@@ -518,8 +526,8 @@ def run_batch_backtest(
         summary['avg_ic_mean'] = np.mean([r.metrics.ic_metrics.ic_mean for r in success_results])
         summary['avg_sharpe'] = np.mean([r.metrics.long_short_metrics.sharpe_ratio for r in success_results])
     
-    print(f"\n批量回测完成: {len(success_results)}/{len(factor_specs)} 成功")
-    
+    logger.info("批量回测完成: %s/%s 成功", len(success_results), len(factor_specs))
+
     return {
         'results': results,
         'errors': errors,

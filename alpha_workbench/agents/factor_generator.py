@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from agno.agent import Agent
@@ -9,6 +10,8 @@ from pydantic import BaseModel, Field
 
 from alpha_workbench.agents.core.model import AlphaModel
 from alpha_workbench.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class FactorSpecModel(BaseModel):
@@ -165,5 +168,5 @@ def generate_factors(
             f["is_fallback"] = False
         return factors
     except Exception as e:
-        print(f"[FactorGenerator] LLM调用失败，使用mock fallback: {e}")
+        logger.warning("FactorGenerator LLM调用失败，使用mock fallback: %s", e)
         return mock_generate_factors(idea_spec, research_spec)

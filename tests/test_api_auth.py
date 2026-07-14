@@ -12,9 +12,9 @@ def _client(tmp_path, monkeypatch) -> TestClient:
     monkeypatch.setenv("APP_SECRET_KEY", "test-secret")
     SQLModel.metadata.clear()
     for module_name in list(sys.modules):
-        if module_name.startswith("alpha_workbench.api"):
+        if module_name.startswith("alpha_workbench.api") or module_name == "alpha_workbench.core.config":
             sys.modules.pop(module_name)
-    import alpha_workbench.api.config as config
+    import alpha_workbench.core.config as config
     import alpha_workbench.api.db as db
     import alpha_workbench.api.main as main
 

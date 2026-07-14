@@ -17,10 +17,10 @@ from alpha_workbench.api.auth.sessions import (
     get_current_user,
     verify_csrf,
 )
-from alpha_workbench.api.config import settings
 from alpha_workbench.api.db import get_db
 from alpha_workbench.api.models import OAuthAccount, User, UserSession, utcnow
 from alpha_workbench.api.schemas import LoginRequest, RegisterRequest, UserRead
+from alpha_workbench.core.config import settings
 
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])

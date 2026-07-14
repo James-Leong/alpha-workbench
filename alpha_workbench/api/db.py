@@ -8,7 +8,7 @@ from pathlib import Path
 from sqlalchemy import text
 from sqlmodel import Session, SQLModel, create_engine
 
-from alpha_workbench.api.config import settings
+from alpha_workbench.core.config import settings
 
 
 def _ensure_sqlite_parent(database_url: str) -> None:
